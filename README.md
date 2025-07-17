@@ -19,12 +19,12 @@ This codebase provides:
 git clone <your-repo-url>
 cd FORCE
 
-# Install dependencies
-pip install -r requirements.txt
-
-# For distributed training with Muon methods, install Muon optimizer
-pip install git+https://github.com/KellerJordan/Muon
+# Create and activate conda environment
+conda env create -f environment.yml
+conda activate FORCE
 ```
+
+**Note**: This experiment is designed for single-process environments. The Muon optimizer implementation used here is from `simple_muon.py`, which is a simplified version that works without distributed training dependencies.
 
 ### Running Experiments
 
@@ -81,7 +81,7 @@ soft_constraint:qnli:2
 
 ## Important Notes
 
-- **Muon Installation**: For methods using Muon optimizer (`muon`, `*+muon`), install the Muon package: `pip install git+https://github.com/KellerJordan/Muon`
+- **Single-Process Design**: This experiment is designed for single-process environments. The Muon optimizer used is from `simple_muon.py`, not the distributed version from the original Muon repository.
 - **GPU Requirements**: Ensure sufficient GPU memory for your batch size and model configuration
 - **Results**: All experiment results are automatically saved to `experiments/` directory
 
@@ -96,8 +96,8 @@ FORCE/
 ├── data_distribution.py   # Non-IID data splitting utilities
 ├── plotting.py            # Visualization and reporting
 ├── compare_experiments.py # Experiment comparison tool
-├── simple_muon.py         # Simplified Muon optimizer
+├── simple_muon.py         # Simplified Muon optimizer for single-process
 ├── run_experiments.sh     # Batch experiment runner
 ├── experiments_config.txt # Experiment configuration
-└── requirements.txt       # Python dependencies
+└── environment.yml        # Conda environment file
 ```
