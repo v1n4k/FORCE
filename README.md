@@ -1,26 +1,18 @@
 # FORCE: Federated Learning with Orthogonal Regularization and Constraint Enforcement
 
-A comprehensive implementation of FORCE (Federated Learning with Orthogonal Regularization and Constraint Enforcement) methods for federated learning experiments.
+A comprehensive implementation of FORCE methods for federated learning experiments. This project implements various orthogonal regularization techniques to improve federated learning performance on non-IID data distributions.
 
-## Overview
+## Project Overview
 
-This project implements various FORCE methods for federated learning, including:
+This codebase provides:
+- **FORCE Methods**: Soft constraint, Newton-Schulz, QR decomposition, and Muon optimizer implementations
+- **Baseline Methods**: Standard LoRA and FFA-LoRA for comparison
+- **Non-IID Data Support**: Dirichlet distribution-based data splitting
+- **Automated Experiment Management**: Batch execution and result comparison tools
 
-- **Soft Constraint**: Orthogonality regularization during training
-- **Newton-Schulz**: Post-training orthogonal repair using Newton-Schulz algorithm
-- **QR Decomposition**: Post-training orthogonal repair using QR decomposition
-- **Muon Optimizer**: Matrix parameter optimization for better convergence
+## Quick Start
 
-## Features
-
-- **Multiple FORCE Methods**: Implementation of all major FORCE algorithms
-- **Non-IID Data Support**: Dirichlet distribution-based data splitting for realistic federated scenarios
-- **DoRA Integration**: Support for Weight-Decomposed Low-Rank Adaptation
-- **Comprehensive Evaluation**: Support for GLUE benchmark datasets
-- **Experiment Management**: Automated experiment tracking and result comparison
-- **Multi-GPU Support**: Distributed training capabilities
-
-## Installation
+### Installation
 
 ```bash
 # Clone the repository
@@ -29,35 +21,69 @@ cd FORCE
 
 # Install dependencies
 pip install -r requirements.txt
+
+# For distributed training with Muon methods, install Muon optimizer
+pip install git+https://github.com/KellerJordan/Muon
 ```
 
-## Usage
+### Running Experiments
 
-### Running Individual Experiments
-
-```bash
-python main.py \
-    --method soft_constraint \
-    --dataset qnli \
-    --num_clients 3 \
-    --num_rounds 10 \
-    --alpha 0.5 \
-    --cuda_device 0
+1. **Configure your experiments** in `experiments_config.txt`:
+```
+# Format: method:dataset:gpu_id
+soft_constraint:qnli:0
+QR:qnli:1
+lora:qnli:2
 ```
 
-### Running Multiple Experiments
-
+2. **Run all experiments**:
 ```bash
-# Run experiments from configuration file
 ./run_experiments.sh --queue --config experiments_config.txt
 ```
 
-### Comparing Results
-
+3. **Monitor progress**:
 ```bash
-# Interactive comparison tool
+./run_experiments.sh --status
+```
+
+4. **Compare results**:
+```bash
 python compare_experiments.py
 ```
+
+## Configuration File
+
+The `experiments_config.txt` file uses simple format: `method:dataset:gpu_id`
+
+### Supported Methods
+- **FORCE**: `soft_constraint`, `Newton_shulz`, `QR`, `muon`
+- **Combined**: `soft_constraint+muon`, `Newton_shulz+muon`, `QR+muon`
+- **Baseline**: `lora`, `ffa_lora`
+
+### Supported Datasets
+- `sst2`, `qqp`, `qnli`, `mnli_matched`, `mnli_mismatched`
+
+### Example Configurations
+
+**Method Comparison:**
+```
+lora:qnli:0
+soft_constraint:qnli:1
+QR:qnli:2
+```
+
+**Multi-Dataset:**
+```
+soft_constraint:sst2:0
+soft_constraint:qqp:1
+soft_constraint:qnli:2
+```
+
+## Important Notes
+
+- **Muon Installation**: For methods using Muon optimizer (`muon`, `*+muon`), install the Muon package: `pip install git+https://github.com/KellerJordan/Muon`
+- **GPU Requirements**: Ensure sufficient GPU memory for your batch size and model configuration
+- **Results**: All experiment results are automatically saved to `experiments/` directory
 
 ## Project Structure
 
@@ -70,51 +96,8 @@ FORCE/
 ├── data_distribution.py   # Non-IID data splitting utilities
 ├── plotting.py            # Visualization and reporting
 ├── compare_experiments.py # Experiment comparison tool
-├── simple_muon.py         # Simplified Muon optimizer implementation
+├── simple_muon.py         # Simplified Muon optimizer
 ├── run_experiments.sh     # Batch experiment runner
-└── experiments_config.txt # Experiment configuration
+├── experiments_config.txt # Experiment configuration
+└── requirements.txt       # Python dependencies
 ```
-
-## Supported Methods
-
-### FORCE Methods
-- `soft_constraint`: Orthogonality regularization during training
-- `Newton_shulz`: Newton-Schulz orthogonalization after each epoch
-- `QR`: QR decomposition for orthogonalization
-- `muon`: Muon optimizer for matrix parameters
-
-### Combined Methods
-- `soft_constraint+muon`: Soft constraint with Muon optimizer
-- `Newton_shulz+muon`: Newton-Schulz with Muon optimizer
-- `QR+muon`: QR decomposition with Muon optimizer
-
-### Baseline Methods
-- `lora`: Standard LoRA (FedIT)
-- `ffa_lora`: FFA-LoRA implementation
-
-## Supported Datasets
-
-- **SST-2**: Stanford Sentiment Treebank
-- **QQP**: Quora Question Pairs
-- **QNLI**: Question Natural Language Inference
-- **MNLI**: Multi-Genre Natural Language Inference (matched/mismatched)
-
-## Configuration
-
-Experiments can be configured using the `experiments_config.txt` file:
-
-```
-# Format: method:dataset:gpu_id
-soft_constraint:qnli:0
-QR+muon:mnli_matched:1
-lora:sst2:2
-```
-
-## Results
-
-Experiment results are automatically saved to the `experiments/` directory with:
-- Configuration files
-- Training logs
-- Accuracy plots
-- Performance metrics
-- Data distribution analysis
