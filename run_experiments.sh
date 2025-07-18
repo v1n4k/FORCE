@@ -1,26 +1,37 @@
 #!/bin/bash
 
 # ===============================================================
-# FLEXIBLE FEDERATED LEARNING EXPERIMENT MANAGER
+# Easy run experiments bash script
 # ===============================================================
 # This script provides flexible execution of federated learning experiments:
 # - Run experiments on specific GPUs with method/dataset combinations
 # - Queue multiple experiments to run sequentially across available GPUs
 # - Automatic plotting after each experiment completion
 # - Support for both FORCE and baseline methods
+# ===============================================================
+# ############ Attention ############
+# ===============================================================
+# 1. This script is designed for single-process environments.
+# 2. BEFEORE you start running experiments, you should check the 
+#    default configuration parameters in the script.
+#    see below in ---- DEFAULT CONFIGURATION PARAMETERS ---- section.
+#    you can use "ctrl + f"/"cmd + f" to find the section.
+# ===============================================================
 #
 # USAGE MODES:
-# 1. Single experiment:
+# 1. Load experiments from configuration file (!!!!!Highly recommended!!!!!):
+#    This is the most flexible way to run experiments, go to experiments_config.txt to arrange experiments.
+#    ./run_experiments.sh --queue --config experiments_config.txt
+#
+# 2. Single experiment:
 #    ./run_experiments.sh --method QR --dataset sst2 --gpu 0
 #
-# 2. Queue multiple experiments:
-#    ./run_experiments.sh --queue --experiments "QR:sst2:0,fedora:qqp:2,ffa_lora:qnli:1"
+# 3. Queue multiple experiments:
+#    ./run_experiments.sh --queue --experiments "QR:sst2:0,lora:qqp:2,ffa_lora:qnli:1"
 #
-# 3. Batch experiments with method/dataset combinations:
-#    ./run_experiments.sh --queue --methods "QR,fedora" --datasets "sst2,qqp" --gpus "0,1,2,3"
+# 4. Batch experiments with method/dataset combinations:
+#    ./run_experiments.sh --queue --methods "QR,lora" --datasets "sst2,qqp" --gpus "0,1,2,3"
 #
-# 4. Load experiments from configuration file:
-#    ./run_experiments.sh --queue --config experiments_config.txt
 # ===============================================================
 
 # ---- HELPER FUNCTIONS ----
@@ -143,72 +154,6 @@ show_recent_experiments() {
     echo "==============================================================="
 }
 
-# ---- PERIODIC STATUS MONITORING ----
-start_periodic_monitoring() {
-    local monitoring_interval=30  # Check every 30 seconds
-    
-    while true; do
-        sleep $monitoring_interval
-        
-        # Check if there are any running experiments
-        local exp_base_dir="${BASE_EXP_DIR}"
-        local running_count=0
-        
-        if [[ -d "$exp_base_dir" ]]; then
-            for exp_dir in "$exp_base_dir"/*; do
-                if [[ -d "$exp_dir" ]]; then
-                    local python_log="$exp_dir/logs/experiment.log"
-                    if [[ -f "$python_log" ]]; then
-                        local last_modified=$(stat -c %Y "$python_log" 2>/dev/null || echo 0)
-                        local current_time=$(date +%s)
-                        local time_diff=$((current_time - last_modified))
-                        
-                        if [[ $time_diff -lt 60 ]]; then
-                            running_count=$((running_count + 1))
-                        fi
-                    fi
-                fi
-            done
-        fi
-        
-        # If no experiments are running, stop monitoring
-        if [[ $running_count -eq 0 ]]; then
-            break
-        fi
-        
-        # Display brief status update
-        echo ""
-        echo "⏰ Status Update ($(date '+%H:%M:%S')): $running_count experiment(s) still running"
-        show_running_experiments_brief
-        echo ""
-    done
-}
-
-show_running_experiments_brief() {
-    local exp_base_dir="${BASE_EXP_DIR}"
-    
-    for exp_dir in "$exp_base_dir"/*; do
-        if [[ -d "$exp_dir" ]]; then
-            local python_log="$exp_dir/logs/experiment.log"
-            if [[ -f "$python_log" ]]; then
-                local exp_name=$(basename "$exp_dir")
-                local last_modified=$(stat -c %Y "$python_log" 2>/dev/null || echo 0)
-                local current_time=$(date +%s)
-                local time_diff=$((current_time - last_modified))
-                
-                if [[ $time_diff -lt 60 ]]; then
-                    # Get latest progress line
-                    local latest_progress=$(tail -n 10 "$python_log" | grep -E "(FL Rounds|Best.*Accuracy|Training Client)" | tail -n 1)
-                    echo "  🔄 $exp_name"
-                    if [[ -n "$latest_progress" ]]; then
-                        echo "     $latest_progress"
-                    fi
-                fi
-            fi
-        fi
-    done
-}
-
 # ---- EXPERIMENT MONITORING COMMANDS ----
 if [[ "$1" == "--status" ]]; then
     show_running_experiments
@@ -254,16 +199,16 @@ fi
 
 # ---- DEFAULT CONFIGURATION PARAMETERS ----
 NUM_EPOCHS=2
-NUM_ROUNDS=10
-NUM_CLIENTS=3
+NUM_ROUNDS=15
+NUM_CLIENTS=8
 LEARNING_RATE=3e-4
 LORA_RANK=4
 LORA_ALPHA=16
 LORA_DROPOUT=0.1
 BATCH_SIZE=32
-GRADIENT_ACCUMULATION_STEPS=1
+GRADIENT_ACCUMULATION_STEPS=2
 LAMBDA_ORTHO=0.0000005
-ALPHA=0.5
+ALPHA=0.3
 MODEL_NAME="roberta-base"
 BASE_EXP_DIR="experiments"
 SEED=42
@@ -703,7 +648,9 @@ run_experiment() {
     local cuda_device=$3
     local exp_id=$4
 
+    echo "==============================================================="
     echo "Running $method on $dataset with GPU $cuda_device (Experiment ID: $exp_id)"
+    echo "==============================================================="
 
     # For federated learning fairness:
     # - Use fixed seed for data distribution (all methods see same data split)
@@ -730,43 +677,7 @@ run_experiment() {
     START_TIME=$(date +%s)
     echo "  - Started at: $(date)"
 
-    # Create a simple progress filter to extract key information
-    progress_filter() {
-        local exp_name="$1"
-        
-        while IFS= read -r line; do
-            # Skip completely empty lines
-            if [[ -z "$line" ]]; then
-                continue
-            fi
-            
-            # Remove any terminal control sequences (for tqdm progress bars)
-            clean_line=$(echo "$line" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
-            
-            # Skip lines that are empty after cleaning
-            if [[ -z "$clean_line" ]]; then
-                continue
-            fi
-            
-            # Show key progress indicators and tag them with experiment name
-            if [[ "$clean_line" =~ FL[[:space:]]*Rounds: ]] || \
-               [[ "$clean_line" =~ "Training Client" ]] || \
-               [[ "$clean_line" =~ "Global evaluation" ]] || \
-               [[ "$clean_line" =~ "Best.*Accuracy" ]] || \
-               [[ "$clean_line" =~ "Final.*Accuracy" ]] || \
-               [[ "$clean_line" =~ "EXPERIMENT SUMMARY" ]] || \
-               [[ "$clean_line" =~ "Results saved to" ]] || \
-               [[ "$clean_line" =~ "INFO.*Initialized optimizers" ]] || \
-               [[ "$clean_line" =~ "INFO.*optimizers for method" ]] || \
-               [[ "$clean_line" =~ "Experiment logging initialized" ]] || \
-               [[ "$clean_line" =~ "ERROR" ]] || \
-               [[ "$clean_line" =~ "Error" ]]; then
-                echo "[$exp_name] $clean_line"
-            fi
-        done
-    }
-
-    # Run the experiment with progress filtering
+    # Run the experiment directly without progress filtering
     CUDA_VISIBLE_DEVICES=$cuda_device python -u main.py \
         --method $method \
         --dataset $dataset \
@@ -787,9 +698,9 @@ run_experiment() {
         --model_seed $model_seed \
         --cuda_device 0 \
         --exp_dir "$BASE_EXP_DIR" \
-        $ENABLE_FEDERATED_SPLIT 2>&1 | progress_filter "${method}_${dataset}_GPU${cuda_device}"
+        $ENABLE_FEDERATED_SPLIT
 
-    RESULT=${PIPESTATUS[0]}
+    RESULT=$?
 
     # Record end time and duration
     END_TIME=$(date +%s)
@@ -799,8 +710,10 @@ run_experiment() {
     SECONDS=$((DURATION % 60))
 
     # Find the experiment directory created by Python
-    local exp_dir_pattern1="${BASE_EXP_DIR}/*${method}_${dataset}*"
-    local exp_dir_pattern2="${BASE_EXP_DIR}/alpha_*/*${method}_${dataset}*"
+    # Replace + with _ in method name for directory matching
+    local method_dir=$(echo "$method" | tr '+' '_')
+    local exp_dir_pattern1="${BASE_EXP_DIR}/*${method_dir}_${dataset}*"
+    local exp_dir_pattern2="${BASE_EXP_DIR}/alpha_*/*${method_dir}_${dataset}*"
     local exp_dirs=($(ls -dt $exp_dir_pattern1 $exp_dir_pattern2 2>/dev/null))
     local latest_exp_dir=""
     local python_log=""
@@ -808,40 +721,66 @@ run_experiment() {
     if [[ ${#exp_dirs[@]} -gt 0 ]]; then
         latest_exp_dir=${exp_dirs[0]}  # Get the most recent directory
         python_log="${latest_exp_dir}/logs/experiment.log"
+        
+        # Export the experiment directory so it can be accessed by the parent shell
+        echo "EXPERIMENT_DIR:$latest_exp_dir" > /tmp/exp_${exp_id}_dir.txt
     fi
 
-    # Report results to terminal
+    # Report results
+    echo ""
+    echo "==============================================================="
     if [ $RESULT -eq 0 ]; then
-        print_success "✓ Completed $method on $dataset using GPU $cuda_device"
+        print_success "✓ Experiment completed successfully!"
+        echo "  Method: $method"
+        echo "  Dataset: $dataset"
+        echo "  GPU: $cuda_device"
         echo "  Duration: ${HOURS}h ${MINUTES}m ${SECONDS}s"
-        if [[ -n "$python_log" && -f "$python_log" ]]; then
-            echo "  Experiment log: $python_log"
-            echo "  Monitor: tail -f $python_log"
-        fi
-        
-        # Run plotting
         if [[ -n "$latest_exp_dir" ]]; then
-            echo "  Generating plots for experiment..."
-            python plotting.py --exp_dir "$latest_exp_dir" --output_dir "$latest_exp_dir/plots"
-            
-            if [ $? -eq 0 ]; then
-                print_success "  ✓ Plots generated successfully"
-            else
-                print_warning "  ⚠ Plot generation failed - check error messages above"
-            fi
+            echo "  Results: $latest_exp_dir"
         fi
-        
+        if [[ -n "$python_log" && -f "$python_log" ]]; then
+            echo "  Log: $python_log"
+        fi
     else
-        print_error "✗ Error running $method on $dataset on GPU $cuda_device"
+        print_error "✗ Experiment failed!"
+        echo "  Method: $method"
+        echo "  Dataset: $dataset"
+        echo "  GPU: $cuda_device"
         echo "  Duration before error: ${HOURS}h ${MINUTES}m ${SECONDS}s"
         if [[ -n "$python_log" && -f "$python_log" ]]; then
             echo "  Error log: $python_log"
-            echo "  Last few lines of log:"
+            echo "  Last error lines:"
             tail -n 10 "$python_log" | sed 's/^/    /'
         fi
     fi
+    echo "==============================================================="
 
     return $RESULT
+}
+
+# ---- POST-EXPERIMENT PLOT GENERATION ----
+generate_plots_for_experiment() {
+    local exp_dir=$1
+    local method=$2
+    local dataset=$3
+    local gpu=$4
+    
+    if [[ -z "$exp_dir" || ! -d "$exp_dir" ]]; then
+        print_error "Cannot generate plots: experiment directory not found"
+        return 1
+    fi
+    
+    echo ""
+    echo "Generating plots for $method on $dataset..."
+    
+    # Generate plots directly
+    if python plotting.py --exp_dir "$exp_dir" --output_dir "$exp_dir/plots" 2>&1; then
+        print_success "✓ Plots generated successfully for $method on $dataset"
+        return 0
+    else
+        print_warning "⚠ Plot generation failed for $method on $dataset"
+        return 1
+    fi
 }
 
 # ---- MAIN EXECUTION ----
@@ -854,140 +793,116 @@ if $QUEUE_MODE; then
         exit 1
     fi
     
-    echo "Total experiments in queue: ${#EXPERIMENT_QUEUE[@]}"
-    echo "Experiments:"
+    echo "==============================================================="
+    echo "EXPERIMENT QUEUE"
+    echo "==============================================================="
+    echo "Total experiments: ${#EXPERIMENT_QUEUE[@]}"
+    echo ""
     for i in "${!EXPERIMENT_QUEUE[@]}"; do
         IFS=':' read -r method dataset gpu <<< "${EXPERIMENT_QUEUE[$i]}"
         echo "  $((i+1)). $method on $dataset (GPU $gpu)"
     done
     echo "==============================================================="
     
-    # Display monitoring information
-    echo "📊 MONITORING ENABLED"
-    echo "  - Automatic status updates every 30 seconds"
-    echo "  - Manual status check: ./run_experiments.sh --status"
-    echo "  - Monitor specific experiment: ./run_experiments.sh --monitor <experiment_name>"
-    echo "==============================================================="
+    # Track running experiments
+    declare -A running_pids
+    declare -A pid_to_exp
+    declare -A exp_dirs
     
-    # Track experiment ID
+    # Start experiments in parallel
     exp_id=0
-    
-    # Create an array to track running processes on each GPU
-    declare -A running_processes
-    declare -A running_exp_info
-    
-    # Initialize GPU tracking
     for exp in "${EXPERIMENT_QUEUE[@]}"; do
         IFS=':' read -r method dataset gpu <<< "$exp"
-        if [[ -z "${running_processes[$gpu]}" ]]; then
-            running_processes[$gpu]=""
-            running_exp_info[$gpu]=""
-        fi
+        
+        echo ""
+        echo "▶ Starting experiment $((exp_id+1))/${#EXPERIMENT_QUEUE[@]}: $method on $dataset (GPU $gpu)"
+        
+        # Run experiment in background and capture its PID
+        (
+            run_experiment "$method" "$dataset" "$gpu" "$exp_id"
+            exit_code=$?
+            
+            # Only generate plots if experiment succeeded
+            if [[ $exit_code -eq 0 ]]; then
+                # Read the experiment directory from the temp file
+                if [[ -f "/tmp/exp_${exp_id}_dir.txt" ]]; then
+                    exp_dir=$(grep "EXPERIMENT_DIR:" "/tmp/exp_${exp_id}_dir.txt" | cut -d: -f2)
+                    rm -f "/tmp/exp_${exp_id}_dir.txt"
+                    
+                    if [[ -n "$exp_dir" && -d "$exp_dir" ]]; then
+                        # Wait a bit to ensure all files are written
+                        sleep 2
+                        
+                        # Check if results.json exists
+                        if [[ -f "$exp_dir/results.json" ]]; then
+                            echo ""
+                            echo "Generating plots for: $exp_dir"
+                            generate_plots_for_experiment "$exp_dir" "$method" "$dataset" "$gpu"
+                        else
+                            echo "Warning: results.json not found in $exp_dir"
+                        fi
+                    else
+                        echo "Warning: Experiment directory not found or invalid: $exp_dir"
+                    fi
+                else
+                    echo "Warning: Could not find experiment directory info for $method on $dataset"
+                fi
+            else
+                echo "Skipping plot generation for failed experiment: $method on $dataset"
+            fi
+        ) &
+        
+        pid=$!
+        running_pids[$gpu]=$pid
+        pid_to_exp[$pid]="$method:$dataset:$gpu"
+        
+        exp_id=$((exp_id + 1))
+        
+        # Small delay to avoid race conditions
+        sleep 2
     done
     
-    # Set up counters
-    total_completed=0
-    exp_waiting=("${EXPERIMENT_QUEUE[@]}")
+    # Wait for all experiments to complete
+    echo ""
+    echo "Waiting for all experiments to complete..."
+    echo ""
     
-    # Start periodic monitoring in background for queue mode
-    echo "🚀 Starting automatic monitoring (PID will be background)..."
-    start_periodic_monitoring &
-    monitor_pid=$!
-    echo "✅ Monitoring started - you'll see status updates every 30 seconds"
+    completed=0
+    total=${#EXPERIMENT_QUEUE[@]}
     
-    # Process the queue
-    while [[ $total_completed -lt ${#EXPERIMENT_QUEUE[@]} ]]; do
-        # Check for finished processes and free up GPUs
-        for gpu in "${!running_processes[@]}"; do
-            pid=${running_processes[$gpu]}
-            if [[ -n "$pid" ]] && ! kill -0 $pid 2>/dev/null; then
-                # Process finished
-                exp_info=${running_exp_info[$gpu]}
-                running_processes[$gpu]=""
-                running_exp_info[$gpu]=""
-                total_completed=$((total_completed + 1))
-                echo "GPU $gpu finished experiment: $exp_info"
-                echo "Total completed: $total_completed/${#EXPERIMENT_QUEUE[@]}"
+    # Monitor running experiments
+    while [[ $completed -lt $total ]]; do
+        for pid in "${!pid_to_exp[@]}"; do
+            if ! kill -0 $pid 2>/dev/null; then
+                # Process completed
+                exp_info=${pid_to_exp[$pid]}
+                IFS=':' read -r method dataset gpu <<< "$exp_info"
                 
-                # Show current status summary
-                echo "--- Current Status ---"
-                active_count=0
-                for g in "${!running_processes[@]}"; do
-                    if [[ -n "${running_processes[$g]}" ]]; then
-                        echo "  GPU $g: ${running_exp_info[$g]}"
-                        active_count=$((active_count + 1))
-                    fi
-                done
-                echo "  Active: $active_count, Completed: $total_completed/${#EXPERIMENT_QUEUE[@]}, Remaining: ${#exp_waiting[@]}"
-                echo "---------------------"
+                wait $pid
+                exit_code=$?
+                
+                if [[ $exit_code -eq 0 ]]; then
+                    echo "✓ Completed: $method on $dataset (GPU $gpu)"
+                else
+                    echo "✗ Failed: $method on $dataset (GPU $gpu)"
+                fi
+                
+                unset pid_to_exp[$pid]
+                completed=$((completed + 1))
+                echo "Progress: $completed/$total experiments completed"
             fi
         done
         
-        # Check for free GPUs and start new jobs
-        for gpu in "${!running_processes[@]}"; do
-            if [[ -z "${running_processes[$gpu]}" ]] && [[ ${#exp_waiting[@]} -gt 0 ]]; then
-                # Get the next experiment for this GPU
-                next_exp=""
-                next_exp_idx=-1
-                
-                for i in "${!exp_waiting[@]}"; do
-                    IFS=':' read -r method dataset exp_gpu <<< "${exp_waiting[$i]}"
-                    if [[ "$exp_gpu" == "$gpu" ]]; then
-                        next_exp="${exp_waiting[$i]}"
-                        next_exp_idx=$i
-                        break
-                    fi
-                done
-                
-                # If no experiment for this GPU, try to find any available experiment
-                if [[ -z "$next_exp" ]]; then
-                    for i in "${!exp_waiting[@]}"; do
-                        IFS=':' read -r method dataset exp_gpu <<< "${exp_waiting[$i]}"
-                        # Check if this GPU is free
-                        if [[ -z "${running_processes[$exp_gpu]}" ]]; then
-                            next_exp="${exp_waiting[$i]}"
-                            next_exp_idx=$i
-                            break
-                        fi
-                    done
-                fi
-                
-                if [[ -n "$next_exp" ]]; then
-                    # Parse experiment details
-                    IFS=':' read -r next_method next_dataset next_gpu <<< "$next_exp"
-                    
-                    # Remove from waiting queue
-                    exp_waiting=("${exp_waiting[@]:0:next_exp_idx}" "${exp_waiting[@]:next_exp_idx+1}")
-                    
-                    # Run in background
-                    echo "Starting experiment $exp_id ($next_method/$next_dataset) on GPU $next_gpu..."
-                    run_experiment "$next_method" "$next_dataset" "$next_gpu" "$exp_id" &
-                    running_processes[$next_gpu]=$!
-                    running_exp_info[$next_gpu]="$next_method:$next_dataset"
-                    
-                    exp_id=$((exp_id + 1))
-                    
-                    # Small delay to avoid race conditions
-                    sleep 2
-                fi
-            fi
-        done
-        
-        # Sleep briefly before checking statuses again
-        if [[ ${#exp_waiting[@]} -gt 0 ]] || [[ $(jobs -p | wc -l) -gt 0 ]]; then
+        # Brief sleep to avoid busy waiting
+        if [[ $completed -lt $total ]]; then
             sleep 5
         fi
     done
     
-    # Final wait
-    echo "Waiting for any final background processes to complete..."
-    wait
-    
-    # Stop periodic monitoring
-    kill $monitor_pid 2>/dev/null || true
-    
+    echo ""
     echo "==============================================================="
     print_success "All queued experiments completed!"
+    echo "==============================================================="
     
 else
     # Single experiment mode
@@ -1013,27 +928,12 @@ else
         exit 1
     fi
     
-    echo "Starting single experiment..."
     echo "==============================================================="
-    
-    # Display monitoring information
-    echo "📊 MONITORING ENABLED"
-    echo "  - Automatic status updates every 30 seconds"
-    echo "  - Manual status check: ./run_experiments.sh --status"
-    echo "  - Monitor specific experiment: ./run_experiments.sh --monitor <experiment_name>"
+    echo "SINGLE EXPERIMENT MODE"
     echo "==============================================================="
-    
-    # Start periodic monitoring in background for single experiment mode
-    echo "🚀 Starting automatic monitoring..."
-    start_periodic_monitoring &
-    monitor_pid=$!
-    echo "✅ Monitoring started - you'll see status updates every 30 seconds"
     
     run_experiment "$METHOD" "$DATASET" "$GPU_ID" 0
     
-    # Stop periodic monitoring
-    kill $monitor_pid 2>/dev/null || true
-    
-    echo "==============================================================="
+    echo ""
     print_success "Single experiment completed!"
 fi 
