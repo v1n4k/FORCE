@@ -187,6 +187,7 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
     # Add split parameters to analysis
     distribution_analysis['alpha'] = alpha
     distribution_analysis['seed'] = seed
+    distribution_analysis['num_clients'] = num_clients
     
     # Save analysis and create visualizations if save_dir is provided
     if save_dir is not None:
@@ -196,12 +197,12 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
         # Check if we're in an alpha directory structure
         parent_dir = save_dir.parent
         if parent_dir.name.startswith('alpha_'):
-            # Use dataset-specific data_distribution folder at alpha level
-            # This ensures different datasets have their own distribution plots
-            alpha_dist_dir = parent_dir / f"data_distribution_{dataset_name}"
+            # Use dataset-specific and client-count-specific data_distribution folder
+            # This ensures different datasets and client counts have their own distribution plots
+            alpha_dist_dir = parent_dir / f"data_distribution_{dataset_name}_c{num_clients}"
             
             if alpha_dist_dir.exists():
-                # Distribution data already exists for this alpha value and dataset
+                # Distribution data already exists for this alpha value, dataset, and client count
                 print(f"Using existing data distribution from: {alpha_dist_dir}")
                 
                 # Create a reference file in the experiment directory
@@ -210,9 +211,10 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
                     f.write(f"Data distribution plots are located at: {alpha_dist_dir.absolute()}\n")
                     f.write(f"Dataset: {dataset_name}\n")
                     f.write(f"Alpha value: {alpha}\n")
+                    f.write(f"Number of clients: {num_clients}\n")
                     f.write(f"Seed: {seed}\n")
             else:
-                # First experiment in this alpha folder for this dataset - generate distribution data
+                # First experiment in this alpha folder for this dataset and client count - generate distribution data
                 alpha_dist_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Save distribution analysis
@@ -227,12 +229,13 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
                     f.write(f"Data distribution plots are located at: {alpha_dist_dir.absolute()}\n")
                     f.write(f"Dataset: {dataset_name}\n")
                     f.write(f"Alpha value: {alpha}\n")
+                    f.write(f"Number of clients: {num_clients}\n")
                     f.write(f"Seed: {seed}\n")
                 
                 print(f"Created new data distribution at: {alpha_dist_dir}")
         else:
             # Not in alpha directory structure (shouldn't happen with federated split, but handle it)
-            dist_dir = save_dir / "data_distribution"
+            dist_dir = save_dir / f"data_distribution_c{num_clients}"
             dist_dir.mkdir(parents=True, exist_ok=True)
             
             # Save distribution analysis
