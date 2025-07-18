@@ -173,6 +173,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
     num_classes = analysis['num_classes']
     client_class_counts = np.array(analysis['client_class_counts'])
     client_sizes = analysis['client_sizes']
+    dataset_name = analysis['dataset_name']
     
     # Set up the plotting style
     plt.style.use('default')
@@ -193,7 +194,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
                 cbar_kws={'label': 'Proportion of Client Data'})
     
     plt.title(f'Data Distribution Heatmap\n'
-              f'Dataset: {analysis["dataset_name"]}, Alpha: {alpha}, Seed: {seed}', 
+              f'Dataset: {dataset_name}, Alpha: {alpha}, Clients: {num_clients}, Seed: {seed}', 
               fontsize=14, fontweight='bold')
     plt.xlabel('Classes', fontsize=12)
     plt.ylabel('Clients', fontsize=12)
@@ -207,6 +208,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
     plt.xlabel('Client ID', fontsize=12)
     plt.ylabel('Number of Samples', fontsize=12)
     plt.title(f'Sample Size Distribution Across Clients\n'
+              f'Dataset: {dataset_name}, Alpha: {alpha}, Clients: {num_clients}\n'
               f'Total Samples: {analysis["total_samples"]}, Avg: {np.mean(client_sizes):.0f}', 
               fontsize=14, fontweight='bold')
     plt.xticks(range(num_clients))
@@ -224,6 +226,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
     plt.xlabel('Client ID', fontsize=12)
     plt.ylabel('Entropy (bits)', fontsize=12)
     plt.title(f'Class Diversity (Entropy) per Client\n'
+              f'Dataset: {dataset_name}, Alpha: {alpha}, Clients: {num_clients}\n'
               f'Higher entropy = more diverse classes', 
               fontsize=14, fontweight='bold')
     plt.xticks(range(num_clients))
@@ -242,6 +245,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
     plt.xlabel('Client ID', fontsize=12)
     plt.ylabel('EMD Distance from Global Distribution', fontsize=12)
     plt.title(f'Non-IID Degree per Client\n'
+              f'Dataset: {dataset_name}, Alpha: {alpha}, Clients: {num_clients}\n'
               f'Higher EMD = more different from global distribution', 
               fontsize=14, fontweight='bold')
     plt.xticks(range(num_clients))
@@ -278,7 +282,7 @@ def visualize_data_distribution(analysis: Dict[str, any], save_dir: Path,
             ax.axis('off')
         
         plt.suptitle(f'Data Distribution Summary\n'
-                     f'Dataset: {analysis["dataset_name"]}, Alpha: {alpha}', 
+                     f'Dataset: {dataset_name}, Alpha: {alpha}, Clients: {num_clients}', 
                      fontsize=20, fontweight='bold', y=0.98)
         
         plt.tight_layout()
