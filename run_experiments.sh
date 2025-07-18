@@ -1,37 +1,13 @@
 #!/bin/bash
 
 # ===============================================================
-# Easy run experiments bash script
+# Intelligent Federated Learning Experiment Runner
 # ===============================================================
-# This script provides flexible execution of federated learning experiments:
-# - Run experiments on specific GPUs with method/dataset combinations
-# - Queue multiple experiments to run sequentially across available GPUs
-# - Automatic plotting after each experiment completion
-# - Support for both FORCE and baseline methods
-# ===============================================================
-# ############ Attention ############
-# ===============================================================
-# 1. This script is designed for single-process environments.
-# 2. BEFEORE you start running experiments, you should check the 
-#    default configuration parameters in the script.
-#    see below in ---- DEFAULT CONFIGURATION PARAMETERS ---- section.
-#    you can use "ctrl + f"/"cmd + f" to find the section.
-# ===============================================================
-#
-# USAGE MODES:
-# 1. Load experiments from configuration file (!!!!!Highly recommended!!!!!):
-#    This is the most flexible way to run experiments, go to experiments_config.txt to arrange experiments.
-#    ./run_experiments.sh --queue --config experiments_config.txt
-#
-# 2. Single experiment:
-#    ./run_experiments.sh --method QR --dataset sst2 --gpu 0
-#
-# 3. Queue multiple experiments:
-#    ./run_experiments.sh --queue --experiments "QR:sst2:0,lora:qqp:2,ffa_lora:qnli:1"
-#
-# 4. Batch experiments with method/dataset combinations:
-#    ./run_experiments.sh --queue --methods "QR,lora" --datasets "sst2,qqp" --gpus "0,1,2,3"
-#
+# Features:
+# - Smart GPU queue management - only runs when GPU is available
+# - Automatic experiment status monitoring
+# - Configuration file support for batch experiments
+# - Automatic plot generation after completion
 # ===============================================================
 
 # ---- HELPER FUNCTIONS ----
@@ -51,151 +27,90 @@ print_warning() {
     echo -e "\e[33m$1\e[0m"
 }
 
-# ---- MONITORING HELPER FUNCTIONS ----
-show_running_experiments() {
-    local exp_base_dir="${BASE_EXP_DIR}"
-    if [[ ! -d "$exp_base_dir" ]]; then
-        echo "No experiments have been run yet."
+# ---- GPU STATUS FUNCTIONS ----
+check_gpu_processes() {
+    local gpu_id=$1
+    # Check if there are any python processes using the GPU
+    local processes=$(nvidia-smi -i $gpu_id --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | grep -i python | wc -l)
+    echo $processes
+}
+
+get_gpu_memory_usage() {
+    local gpu_id=$1
+    # Get memory usage percentage for specific GPU
+    local mem_info=$(nvidia-smi -i $gpu_id --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null)
+    if [[ -z "$mem_info" ]]; then
+        echo "100"  # Return 100% if can't get info (assume busy)
         return
     fi
     
-    echo "==============================================================="
-    echo "CURRENTLY RUNNING EXPERIMENTS"
-    echo "==============================================================="
+    local mem_used=$(echo $mem_info | cut -d',' -f1 | xargs)
+    local mem_total=$(echo $mem_info | cut -d',' -f2 | xargs)
     
-    local found_running=false
-    for exp_dir in "$exp_base_dir"/*; do
-        if [[ -d "$exp_dir" ]]; then
-            local python_log="$exp_dir/logs/experiment.log"
-            if [[ -f "$python_log" ]]; then
-                # Check if experiment is still running (log file being written to)
-                local exp_name=$(basename "$exp_dir")
-                local last_modified=$(stat -c %Y "$python_log" 2>/dev/null || echo 0)
-                local current_time=$(date +%s)
-                local time_diff=$((current_time - last_modified))
-                
-                # If log was modified within last 60 seconds, consider it running
-                if [[ $time_diff -lt 60 ]]; then
-                    found_running=true
-                    echo "🔄 $exp_name"
-                    echo "   Log: $python_log"
-                    echo "   Monitor: tail -f $python_log"
-                    echo "   Last activity: $time_diff seconds ago"
-                    echo ""
-                fi
-            fi
-        fi
-    done
-    
-    if [[ "$found_running" = false ]]; then
-        echo "No experiments currently running."
-    fi
-    
-    echo "==============================================================="
-}
-
-show_recent_experiments() {
-    local exp_base_dir="${BASE_EXP_DIR}"
-    local count=${1:-5}
-    
-    if [[ ! -d "$exp_base_dir" ]]; then
-        echo "No experiments have been run yet."
-        return
-    fi
-    
-    echo "==============================================================="
-    echo "RECENT EXPERIMENTS (Last $count)"
-    echo "==============================================================="
-    
-    # Get most recent experiment directories
-    local recent_dirs=($(ls -dt "$exp_base_dir"/* 2>/dev/null | head -n $count))
-    
-    for exp_dir in "${recent_dirs[@]}"; do
-        if [[ -d "$exp_dir" ]]; then
-            local exp_name=$(basename "$exp_dir")
-            local python_log="$exp_dir/logs/experiment.log"
-            local status="Unknown"
-            local last_line=""
-            
-            if [[ -f "$python_log" ]]; then
-                # Check if experiment completed successfully
-                if grep -q "EXPERIMENT SUMMARY" "$python_log" 2>/dev/null; then
-                    if tail -n 20 "$python_log" | grep -q "Results saved to" 2>/dev/null; then
-                        status="✅ Completed"
-                    else
-                        status="❌ Failed"
-                    fi
-                else
-                    # Check if still running
-                    local last_modified=$(stat -c %Y "$python_log" 2>/dev/null || echo 0)
-                    local current_time=$(date +%s)
-                    local time_diff=$((current_time - last_modified))
-                    
-                    if [[ $time_diff -lt 60 ]]; then
-                        status="🔄 Running"
-                    else
-                        status="⏸️ Stopped"
-                    fi
-                fi
-                
-                # Get last meaningful line
-                last_line=$(tail -n 10 "$python_log" | grep -E "(FL Rounds|Best.*Accuracy|Final.*Accuracy|Error|ERROR)" | tail -n 1)
-            fi
-            
-            echo "$status $exp_name"
-            if [[ -n "$last_line" ]]; then
-                echo "   Latest: $last_line"
-            fi
-            echo "   Log: $python_log"
-            echo ""
-        fi
-    done
-    
-    echo "==============================================================="
-}
-
-# ---- EXPERIMENT MONITORING COMMANDS ----
-if [[ "$1" == "--status" ]]; then
-    show_running_experiments
-    echo ""
-    show_recent_experiments
-    exit 0
-fi
-
-if [[ "$1" == "--monitor" ]]; then
-    if [[ -z "$2" ]]; then
-        print_error "Usage: $0 --monitor <experiment_name_pattern>"
-        echo "Available experiments:"
-        ls -1 "${BASE_EXP_DIR}/" 2>/dev/null | head -10
-        exit 1
-    fi
-    
-    local pattern="$2"
-    local exp_base_dir="${BASE_EXP_DIR}"
-    local matching_logs=($(find "$exp_base_dir" -name "*${pattern}*" -path "*/logs/experiment.log" 2>/dev/null))
-    
-    if [[ ${#matching_logs[@]} -eq 0 ]]; then
-        print_error "No experiments found matching pattern: $pattern"
-        echo "Available experiments:"
-        ls -1 "$exp_base_dir" 2>/dev/null | head -10
-        exit 1
-    elif [[ ${#matching_logs[@]} -eq 1 ]]; then
-        echo "Monitoring: ${matching_logs[0]}"
-        echo "Press Ctrl+C to stop monitoring"
-        tail -f "${matching_logs[0]}"
+    if [[ -n "$mem_used" && -n "$mem_total" && "$mem_total" -gt 0 ]]; then
+        local mem_percent=$(( (mem_used * 100) / mem_total ))
+        echo $mem_percent
     else
-        echo "Multiple experiments found matching pattern '$pattern':"
-        for log in "${matching_logs[@]}"; do
-            local exp_name=$(dirname $(dirname "$log"))
-            exp_name=$(basename "$exp_name")
-            echo "  - $exp_name: $log"
-        done
-        echo ""
-        echo "Please be more specific with the pattern."
-        exit 1
+        echo "100"
     fi
-    exit 0
-fi
+}
+
+get_gpu_free_memory() {
+    local gpu_id=$1
+    # Get free memory in MB
+    local free_mem=$(nvidia-smi -i $gpu_id --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | xargs)
+    if [[ -z "$free_mem" ]]; then
+        echo "0"
+    else
+        echo $free_mem
+    fi
+}
+
+is_gpu_available() {
+    local gpu_id=$1
+    
+    # Check 1: Are there any python processes on this GPU?
+    local num_processes=$(check_gpu_processes $gpu_id)
+    if [[ $num_processes -gt 0 ]]; then
+        return 1  # GPU is busy
+    fi
+    
+    # Check 2: Is memory usage below threshold?
+    local mem_usage=$(get_gpu_memory_usage $gpu_id)
+    if [[ $mem_usage -gt $MAX_GPU_MEMORY_PERCENT ]]; then
+        return 1  # GPU memory is too high
+    fi
+    
+    # Check 3: Is there enough free memory?
+    local free_mem=$(get_gpu_free_memory $gpu_id)
+    if [[ $free_mem -lt $MIN_FREE_MEMORY_MB ]]; then
+        return 1  # Not enough free memory
+    fi
+    
+    return 0  # GPU is available
+}
+
+wait_for_gpu() {
+    local gpu_id=$1
+    local experiment_name=$2
+    
+    print_info "Checking GPU $gpu_id availability for: $experiment_name"
+    
+    while true; do
+        if is_gpu_available $gpu_id; then
+            print_success "GPU $gpu_id is available!"
+            break
+        else
+            local processes=$(check_gpu_processes $gpu_id)
+            local mem_usage=$(get_gpu_memory_usage $gpu_id)
+            local free_mem=$(get_gpu_free_memory $gpu_id)
+            
+            echo "  GPU $gpu_id busy: ${processes} processes, ${mem_usage}% memory used, ${free_mem}MB free"
+            echo "  Waiting ${GPU_CHECK_INTERVAL} seconds..."
+            sleep $GPU_CHECK_INTERVAL
+        fi
+    done
+}
 
 # ---- DEFAULT CONFIGURATION PARAMETERS ----
 NUM_EPOCHS=2
@@ -213,472 +128,164 @@ MODEL_NAME="roberta-base"
 BASE_EXP_DIR="experiments"
 SEED=42
 ENABLE_FEDERATED_SPLIT="--enable_federated_split"
-
-# ---- EXECUTION MODE ----
-QUEUE_MODE=false
-SINGLE_MODE=true
-
-# ---- EXPERIMENT QUEUE ----
-EXPERIMENT_QUEUE=()
-
-# ---- PORT CONFIGURATION FOR MUON METHODS ----
 BASE_PORT=12355
 
+# GPU monitoring settings
+GPU_CHECK_INTERVAL=30  # Check GPU status every 30 seconds
+MAX_GPU_MEMORY_PERCENT=85  # Maximum GPU memory usage before considering it "busy"
+MIN_FREE_MEMORY_MB=2000  # Minimum free memory required to start new experiment
+
 # ---- PARSE COMMAND LINE ARGUMENTS ----
+EXPERIMENT_QUEUE=()
+CONFIG_FILE=""
+
 while [[ $# -gt 0 ]]; do
-  key="$1"
-  case $key in
-    --method)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --method"
-        exit 1
-      fi
-      METHOD="$2"
-      shift 2
-      ;;
-    --dataset)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --dataset"
-        exit 1
-      fi
-      DATASET="$2"
-      shift 2
-      ;;
-    --gpu)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --gpu"
-        exit 1
-      fi
-      GPU_ID="$2"
-      shift 2
-      ;;
-    --experiments)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --experiments"
-        exit 1
-      fi
-      EXPERIMENTS_STRING="$2"
-      shift 2
-      ;;
-    --methods)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --methods"
-        exit 1
-      fi
-      METHODS_STRING="$2"
-      shift 2
-      ;;
-    --datasets)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --datasets"
-        exit 1
-      fi
-      DATASETS_STRING="$2"
-      shift 2
-      ;;
-    --gpus)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --gpus"
-        exit 1
-      fi
-      GPUS_STRING="$2"
-      shift 2
-      ;;
-    --config)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --config"
-        exit 1
-      fi
-      CONFIG_FILE="$2"
-      shift 2
-      ;;
-    --queue)
-      QUEUE_MODE=true
-      SINGLE_MODE=false
-      shift
-      ;;
-    --epochs)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --epochs"
-        exit 1
-      fi
-      NUM_EPOCHS="$2"
-      shift 2
-      ;;
-    --rounds)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --rounds"
-        exit 1
-      fi
-      NUM_ROUNDS="$2"
-      shift 2
-      ;;
-    --clients)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --clients"
-        exit 1
-      fi
-      NUM_CLIENTS="$2"
-      shift 2
-      ;;
-    --lr)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --lr"
-        exit 1
-      fi
-      LEARNING_RATE="$2"
-      shift 2
-      ;;
-    --lora-rank)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --lora-rank"
-        exit 1
-      fi
-      LORA_RANK="$2"
-      shift 2
-      ;;
-    --lora-alpha)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --lora-alpha"
-        exit 1
-      fi
-      LORA_ALPHA="$2"
-      shift 2
-      ;;
-    --lora-dropout)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --lora-dropout"
-        exit 1
-      fi
-      LORA_DROPOUT="$2"
-      shift 2
-      ;;
-    --batch-size)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --batch-size"
-        exit 1
-      fi
-      BATCH_SIZE="$2"
-      shift 2
-      ;;
-    --grad-accum)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --grad-accum"
-        exit 1
-      fi
-      GRADIENT_ACCUMULATION_STEPS="$2"
-      shift 2
-      ;;
-    --lambda-ortho)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --lambda-ortho"
-        exit 1
-      fi
-      LAMBDA_ORTHO="$2"
-      shift 2
-      ;;
-    --alpha)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --alpha"
-        exit 1
-      fi
-      ALPHA="$2"
-      shift 2
-      ;;
-    --model)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --model"
-        exit 1
-      fi
-      MODEL_NAME="$2"
-      shift 2
-      ;;
-    --exp-dir)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --exp-dir"
-        exit 1
-      fi
-      BASE_EXP_DIR="$2"
-      shift 2
-      ;;
-    --seed)
-      if [[ -z "$2" || "$2" == --* ]]; then
-        print_error "Missing value for --seed"
-        exit 1
-      fi
-      SEED="$2"
-      shift 2
-      ;;
-    --enable-federated-split)
-      ENABLE_FEDERATED_SPLIT="--enable_federated_split"
-      shift
-      ;;
-    --help)
-      echo "==============================================================="
-      echo "FLEXIBLE FEDERATED LEARNING EXPERIMENT MANAGER - HELP"
-      echo "==============================================================="
-      echo "Usage: $0 [OPTIONS]"
-      echo ""
-      echo "EXECUTION MODES:"
-      echo "  1. Single experiment:"
-      echo "     $0 --method <method> --dataset <dataset> --gpu <gpu_id>"
-      echo ""
-      echo "  2. Queue multiple experiments:"
-      echo "     $0 --queue --experiments \"method1:dataset1:gpu1,method2:dataset2:gpu2\""
-      echo ""
-      echo "  3. Batch experiments:"
-      echo "     $0 --queue --methods \"method1,method2\" --datasets \"dataset1,dataset2\" --gpus \"gpu1,gpu2\""
-      echo ""
-      echo "  4. Load from config file:"
-      echo "     $0 --queue --config <config_file>"
-      echo ""
-      echo "MONITORING MODES:"
-      echo "  5. View experiment status:"
-      echo "     $0 --status"
-      echo ""
-      echo "  6. Monitor specific experiment:"
-      echo "     $0 --monitor <experiment_pattern>"
-      echo ""
-      echo "METHODS:"
-      echo "  FORCE methods: soft_constraint, Newton_shulz, QR, muon"
-      echo "  Combined methods: soft_constraint+muon, Newton_shulz+muon, QR+muon"
-      echo "  Baseline methods: lora, ffa_lora"
-      echo ""
-      echo "DATASETS: sst2, qqp, qnli, mnli_matched, mnli_mismatched"
-      echo ""
-      echo "PARAMETERS:"
-      echo "  --epochs <n>                    Training epochs per round (default: 3)"
-      echo "  --rounds <n>                    Communication rounds (default: 5)"
-      echo "  --clients <n>                   Number of clients (default: 3)"
-      echo "  --lr <rate>                     Learning rate (default: 3e-4)"
-      echo "  --lora-rank <n>                 LoRA rank (default: 4)"
-      echo "  --lora-alpha <n>                LoRA alpha (default: 16)"
-      echo "  --lora-dropout <rate>           LoRA dropout (default: 0.1)"
-      echo "  --batch-size <n>                Batch size (default: 32)"
-      echo "  --grad-accum <n>                Gradient accumulation steps (default: 1)"
-      echo "  --lambda-ortho <value>          Orthogonality weight (default: 0.1)"
-      echo "  --alpha <value>                 Dirichlet alpha (default: 0.5)"
-      echo "  --model <name>                  Model name (default: roberta-base)"
-      echo "  --exp-dir <path>                Experiment directory (default: experiments)"
-      echo "  --seed <n>                      Random seed (default: 42)"
-      echo "  --enable-federated-split        Enable federated non-IID split"
-      echo ""
-      echo "EXAMPLES:"
-      echo "  # Single experiment"
-      echo "  $0 --method QR --dataset sst2 --gpu 0"
-      echo ""
-      echo "  # Queue multiple experiments"
-echo "  $0 --queue --experiments \"QR:sst2:0,lora:qqp:2,ffa_lora:qnli:1\""
-echo ""
-echo "  # Batch experiments across GPUs"
-echo "  $0 --queue --methods \"QR,lora,ffa_lora\" --datasets \"sst2,qqp\" --gpus \"0,1,2,3\""
-echo ""
-echo "  # Monitor experiments"
-echo "  $0 --status                    # View all running and recent experiments"
-echo "  $0 --monitor QR_sst2          # Monitor specific experiment by pattern"
-echo ""
-echo "CONFIG FILE FORMAT:"
-echo "  method:dataset:gpu_id"
-echo "  QR:sst2:0"
-echo "  lora:qqp:2"
-echo "  ffa_lora:qnli:1"
-      echo "==============================================================="
-      exit 0
-      ;;
-    *)
-      print_error "Unknown option: $key"
-      echo "Use --help for usage information"
-      exit 1
-      ;;
-  esac
+    case $1 in
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --gpu-check-interval)
+            GPU_CHECK_INTERVAL="$2"
+            shift 2
+            ;;
+        --max-gpu-memory)
+            MAX_GPU_MEMORY_PERCENT="$2"
+            shift 2
+            ;;
+        --min-free-memory)
+            MIN_FREE_MEMORY_MB="$2"
+            shift 2
+            ;;
+        --help)
+            echo "==============================================================="
+            echo "INTELLIGENT FEDERATED LEARNING EXPERIMENT RUNNER"
+            echo "==============================================================="
+            echo "Usage: $0 --config <config_file> [options]"
+            echo ""
+            echo "Options:"
+            echo "  --config <file>              Configuration file with experiments"
+            echo "  --gpu-check-interval <sec>   GPU check interval (default: 30)"
+            echo "  --max-gpu-memory <percent>   Max GPU memory usage (default: 85)"
+            echo "  --min-free-memory <MB>       Min free memory required (default: 2000)"
+            echo ""
+            echo "Config file format (experiments_config.txt):"
+            echo "  method:dataset:gpu_id"
+            echo "  soft_constraint:qnli:0"
+            echo "  QR+muon:qqp:1"
+            echo "  lora:sst2:2"
+            echo ""
+            echo "Features:"
+            echo "  - Automatically queues experiments when GPU is busy"
+            echo "  - Monitors GPU memory to prevent OOM"
+            echo "  - Generates plots after each experiment"
+            echo "==============================================================="
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
 done
 
-# ---- VALIDATE INPUTS ----
-validate_method() {
-    local method=$1
-    local valid_methods=("soft_constraint" "Newton_shulz" "QR" "muon" 
-                        "soft_constraint+muon" "Newton_shulz+muon" "QR+muon"
-                        "lora" "ffa_lora")
-    
-    for valid in "${valid_methods[@]}"; do
-        if [[ "$method" == "$valid" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
+# ---- VALIDATE CONFIG FILE ----
+if [[ -z "$CONFIG_FILE" ]]; then
+    print_error "Config file required. Use --config <file>"
+    echo "Run $0 --help for usage information"
+    exit 1
+fi
 
-validate_dataset() {
-    local dataset=$1
-    local valid_datasets=("sst2" "qqp" "qnli" "mnli_matched" "mnli_mismatched")
-    
-    for valid in "${valid_datasets[@]}"; do
-        if [[ "$dataset" == "$valid" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    print_error "Config file not found: $CONFIG_FILE"
+    exit 1
+fi
 
 # ---- BUILD EXPERIMENT QUEUE ----
-build_experiment_queue() {
-    if [[ -n "$CONFIG_FILE" ]]; then
-        # Load from config file
-        if [[ ! -f "$CONFIG_FILE" ]]; then
-            print_error "Config file not found: $CONFIG_FILE"
-            exit 1
-        fi
-        
-        while IFS= read -r line; do
-            # Skip empty lines and comments
-            if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
-                continue
-            fi
-            
-            # Parse line: method:dataset:gpu
-            IFS=':' read -r method dataset gpu <<< "$line"
-            
-            # Validate inputs
-            if ! validate_method "$method"; then
-                print_warning "Invalid method in config: $method (line: $line)"
-                continue
-            fi
-            
-            if ! validate_dataset "$dataset"; then
-                print_warning "Invalid dataset in config: $dataset (line: $line)"
-                continue
-            fi
-            
-            if ! [[ "$gpu" =~ ^[0-9]+$ ]]; then
-                print_warning "Invalid GPU ID in config: $gpu (line: $line)"
-                continue
-            fi
-            
-            EXPERIMENT_QUEUE+=("$method:$dataset:$gpu")
-            
-        done < "$CONFIG_FILE"
-        
-    elif [[ -n "$EXPERIMENTS_STRING" ]]; then
-        # Parse experiments string
-        IFS=',' read -r -a experiments <<< "$EXPERIMENTS_STRING"
-        
-        for exp in "${experiments[@]}"; do
-            IFS=':' read -r method dataset gpu <<< "$exp"
-            
-            # Validate inputs
-            if ! validate_method "$method"; then
-                print_warning "Invalid method: $method"
-                continue
-            fi
-            
-            if ! validate_dataset "$dataset"; then
-                print_warning "Invalid dataset: $dataset"
-                continue
-            fi
-            
-            if ! [[ "$gpu" =~ ^[0-9]+$ ]]; then
-                print_warning "Invalid GPU ID: $gpu"
-                continue
-            fi
-            
-            EXPERIMENT_QUEUE+=("$method:$dataset:$gpu")
-        done
-        
-    elif [[ -n "$METHODS_STRING" && -n "$DATASETS_STRING" && -n "$GPUS_STRING" ]]; then
-        # Parse batch configuration
-        IFS=',' read -r -a methods <<< "$METHODS_STRING"
-        IFS=',' read -r -a datasets <<< "$DATASETS_STRING"
-        IFS=',' read -r -a gpus <<< "$GPUS_STRING"
-        
-        local exp_id=0
-        for method in "${methods[@]}"; do
-            for dataset in "${datasets[@]}"; do
-                # Validate method and dataset
-                if ! validate_method "$method"; then
-                    print_warning "Invalid method: $method"
-                    continue
-                fi
-                
-                if ! validate_dataset "$dataset"; then
-                    print_warning "Invalid dataset: $dataset"
-                    continue
-                fi
-                
-                # Assign GPU (round-robin)
-                local gpu_idx=$((exp_id % ${#gpus[@]}))
-                local gpu=${gpus[$gpu_idx]}
-                
-                EXPERIMENT_QUEUE+=("$method:$dataset:$gpu")
-                exp_id=$((exp_id + 1))
-            done
-        done
+while IFS= read -r line; do
+    # Skip empty lines and comments
+    if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
+        continue
     fi
-}
+    
+    # Parse line: method:dataset:gpu
+    IFS=':' read -r method dataset gpu <<< "$line"
+    
+    # Basic validation
+    if [[ -n "$method" && -n "$dataset" && "$gpu" =~ ^[0-9]+$ ]]; then
+        EXPERIMENT_QUEUE+=("$method:$dataset:$gpu")
+    else
+        print_warning "Invalid line in config: $line"
+    fi
+done < "$CONFIG_FILE"
 
-# ---- CREATE OUTPUT DIRECTORY ----
-mkdir -p $BASE_EXP_DIR 2>/dev/null || { print_error "Failed to create output directory: $BASE_EXP_DIR"; exit 1; }
+if [[ ${#EXPERIMENT_QUEUE[@]} -eq 0 ]]; then
+    print_error "No valid experiments found in config file"
+    exit 1
+fi
+
+# ---- CHECK NVIDIA-SMI ----
+if ! command -v nvidia-smi &> /dev/null; then
+    print_error "nvidia-smi not found. Please ensure NVIDIA drivers are installed."
+    exit 1
+fi
 
 # ---- DISPLAY CONFIGURATION ----
 echo "==============================================================="
-echo "FEDERATED LEARNING EXPERIMENT CONFIGURATION"
+echo "INTELLIGENT EXPERIMENT RUNNER"
 echo "==============================================================="
-echo "Epochs per Round: $NUM_EPOCHS"
-echo "Communication Rounds: $NUM_ROUNDS"
-echo "Number of Clients: $NUM_CLIENTS"
-echo "Learning Rate: $LEARNING_RATE"
-echo "LoRA Rank: $LORA_RANK"
-echo "LoRA Alpha: $LORA_ALPHA"
-echo "LoRA Dropout: $LORA_DROPOUT"
-echo "Batch Size: $BATCH_SIZE"
-echo "Gradient Accumulation Steps: $GRADIENT_ACCUMULATION_STEPS"
-echo "Lambda Ortho: $LAMBDA_ORTHO"
-echo "Alpha: $ALPHA"
-echo "Model: $MODEL_NAME"
-echo "Base Experiment Directory: $BASE_EXP_DIR"
-echo "Seed: $SEED"
-if [[ -n "$ENABLE_FEDERATED_SPLIT" ]]; then
-    echo "Federated Split: Enabled"
-fi
+echo "Config file: $CONFIG_FILE"
+echo "Total experiments: ${#EXPERIMENT_QUEUE[@]}"
+echo ""
+echo "GPU Management:"
+echo "  Max memory usage: ${MAX_GPU_MEMORY_PERCENT}%"
+echo "  Min free memory: ${MIN_FREE_MEMORY_MB}MB"
+echo "  Check interval: ${GPU_CHECK_INTERVAL}s"
+echo ""
+echo "Experiments to run:"
+for i in "${!EXPERIMENT_QUEUE[@]}"; do
+    IFS=':' read -r method dataset gpu <<< "${EXPERIMENT_QUEUE[$i]}"
+    echo "  $((i+1)). $method on $dataset (GPU $gpu)"
+done
 echo "==============================================================="
 
 # ---- EXPERIMENT RUNNER FUNCTION ----
-run_experiment() {
+run_experiment_with_queue() {
     local method=$1
     local dataset=$2
-    local cuda_device=$3
+    local gpu_id=$3
     local exp_id=$4
-
+    
+    local experiment_name="${method}_${dataset}"
+    
+    # Wait for GPU to be available
+    wait_for_gpu $gpu_id "$experiment_name"
+    
+    echo ""
     echo "==============================================================="
-    echo "Running $method on $dataset with GPU $cuda_device (Experiment ID: $exp_id)"
+    echo "Starting: $method on $dataset with GPU $gpu_id"
     echo "==============================================================="
-
-    # For federated learning fairness:
-    # - Use fixed seed for data distribution (all methods see same data split)
-    # - Use method-specific seed for model initialization (different initializations)
-    local data_seed=$SEED  # Fixed for all methods
+    
+    # Set up seeds for fair comparison
+    local data_seed=$SEED
     local method_hash=$(echo -n "$method" | cksum | cut -d' ' -f1)
     local model_seed=$((SEED + method_hash % 1000))
     
-    echo "  - Data distribution seed: $data_seed (fixed for fair comparison)"
-    echo "  - Model initialization seed: $model_seed (method-specific)"
-
     # Set up MUON environment if needed
-    local port_param=""
     if [[ "$method" == *"muon"* ]]; then
-        local port=$((BASE_PORT + exp_id*100 + 10#$cuda_device))
-        # Set MASTER_PORT as environment variable instead of command line argument
-        # since main.py has its own port allocation logic
+        local port=$((BASE_PORT + exp_id*100 + gpu_id*10))
         export MASTER_ADDR="localhost"
         export MASTER_PORT="$port"
-        echo "  - MUON method detected: Using communication port $port"
+        echo "  - MUON port: $port"
     fi
-
+    
     # Record start time
     START_TIME=$(date +%s)
     echo "  - Started at: $(date)"
-
-    # Run the experiment directly without progress filtering
-    CUDA_VISIBLE_DEVICES=$cuda_device python -u main.py \
+    
+    # Run the experiment
+    CUDA_VISIBLE_DEVICES=$gpu_id python -u main.py \
         --method $method \
         --dataset $dataset \
         --model_name $MODEL_NAME \
@@ -699,241 +306,85 @@ run_experiment() {
         --cuda_device 0 \
         --exp_dir "$BASE_EXP_DIR" \
         $ENABLE_FEDERATED_SPLIT
-
+    
     RESULT=$?
-
-    # Record end time and duration
+    
+    # Record end time
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     HOURS=$((DURATION / 3600))
     MINUTES=$(( (DURATION % 3600) / 60 ))
     SECONDS=$((DURATION % 60))
-
-    # Find the experiment directory created by Python
-    # Replace + with _ in method name for directory matching
-    local method_dir=$(echo "$method" | tr '+' '_')
-    local exp_dir_pattern1="${BASE_EXP_DIR}/*${method_dir}_${dataset}*"
-    local exp_dir_pattern2="${BASE_EXP_DIR}/alpha_*/*${method_dir}_${dataset}*"
-    local exp_dirs=($(ls -dt $exp_dir_pattern1 $exp_dir_pattern2 2>/dev/null))
-    local latest_exp_dir=""
-    local python_log=""
     
-    if [[ ${#exp_dirs[@]} -gt 0 ]]; then
-        latest_exp_dir=${exp_dirs[0]}  # Get the most recent directory
-        python_log="${latest_exp_dir}/logs/experiment.log"
-        
-        # Export the experiment directory so it can be accessed by the parent shell
-        echo "EXPERIMENT_DIR:$latest_exp_dir" > /tmp/exp_${exp_id}_dir.txt
-    fi
-
-    # Report results
-    echo ""
-    echo "==============================================================="
     if [ $RESULT -eq 0 ]; then
-        print_success "✓ Experiment completed successfully!"
-        echo "  Method: $method"
-        echo "  Dataset: $dataset"
-        echo "  GPU: $cuda_device"
-        echo "  Duration: ${HOURS}h ${MINUTES}m ${SECONDS}s"
-        if [[ -n "$latest_exp_dir" ]]; then
-            echo "  Results: $latest_exp_dir"
-        fi
-        if [[ -n "$python_log" && -f "$python_log" ]]; then
-            echo "  Log: $python_log"
+        print_success "✓ Completed: $method on $dataset (${HOURS}h ${MINUTES}m ${SECONDS}s)"
+        
+        # Generate plots
+        local method_dir=$(echo "$method" | tr '+' '_')
+        local exp_dirs=($(ls -dt ${BASE_EXP_DIR}/*${method_dir}_${dataset}* 2>/dev/null))
+        if [[ ${#exp_dirs[@]} -gt 0 ]]; then
+            echo "  Generating plots..."
+            python plotting.py --exp_dir "${exp_dirs[0]}" --output_dir "${exp_dirs[0]}/plots" 2>&1
         fi
     else
-        print_error "✗ Experiment failed!"
-        echo "  Method: $method"
-        echo "  Dataset: $dataset"
-        echo "  GPU: $cuda_device"
-        echo "  Duration before error: ${HOURS}h ${MINUTES}m ${SECONDS}s"
-        if [[ -n "$python_log" && -f "$python_log" ]]; then
-            echo "  Error log: $python_log"
-            echo "  Last error lines:"
-            tail -n 10 "$python_log" | sed 's/^/    /'
-        fi
+        print_error "✗ Failed: $method on $dataset"
     fi
-    echo "==============================================================="
-
+    
     return $RESULT
 }
 
-# ---- POST-EXPERIMENT PLOT GENERATION ----
-generate_plots_for_experiment() {
-    local exp_dir=$1
-    local method=$2
-    local dataset=$3
-    local gpu=$4
-    
-    if [[ -z "$exp_dir" || ! -d "$exp_dir" ]]; then
-        print_error "Cannot generate plots: experiment directory not found"
-        return 1
-    fi
-    
-    echo ""
-    echo "Generating plots for $method on $dataset..."
-    
-    # Generate plots directly
-    if python plotting.py --exp_dir "$exp_dir" --output_dir "$exp_dir/plots" 2>&1; then
-        print_success "✓ Plots generated successfully for $method on $dataset"
-        return 0
-    else
-        print_warning "⚠ Plot generation failed for $method on $dataset"
-        return 1
-    fi
-}
-
 # ---- MAIN EXECUTION ----
-if $QUEUE_MODE; then
-    # Build experiment queue
-    build_experiment_queue
+mkdir -p $BASE_EXP_DIR 2>/dev/null
+
+# Start all experiments (they will queue automatically)
+declare -a pids
+exp_id=0
+
+for exp in "${EXPERIMENT_QUEUE[@]}"; do
+    IFS=':' read -r method dataset gpu <<< "$exp"
     
-    if [[ ${#EXPERIMENT_QUEUE[@]} -eq 0 ]]; then
-        print_error "No valid experiments in queue"
-        exit 1
-    fi
+    (
+        run_experiment_with_queue "$method" "$dataset" "$gpu" "$exp_id"
+    ) &
     
-    echo "==============================================================="
-    echo "EXPERIMENT QUEUE"
-    echo "==============================================================="
-    echo "Total experiments: ${#EXPERIMENT_QUEUE[@]}"
-    echo ""
-    for i in "${!EXPERIMENT_QUEUE[@]}"; do
-        IFS=':' read -r method dataset gpu <<< "${EXPERIMENT_QUEUE[$i]}"
-        echo "  $((i+1)). $method on $dataset (GPU $gpu)"
-    done
-    echo "==============================================================="
+    pids+=($!)
+    exp_id=$((exp_id + 1))
     
-    # Track running experiments
-    declare -A running_pids
-    declare -A pid_to_exp
-    declare -A exp_dirs
-    
-    # Start experiments in parallel
-    exp_id=0
-    for exp in "${EXPERIMENT_QUEUE[@]}"; do
-        IFS=':' read -r method dataset gpu <<< "$exp"
+    # Small delay to avoid race conditions
+    sleep 2
+done
+
+# Monitor progress
+echo ""
+echo "All experiments queued. Monitoring progress..."
+echo ""
+
+completed=0
+total=${#EXPERIMENT_QUEUE[@]}
+
+while [[ $completed -lt $total ]]; do
+    for i in "${!pids[@]}"; do
+        if [[ -z "${pids[$i]}" ]]; then
+            continue
+        fi
         
-        echo ""
-        echo "▶ Starting experiment $((exp_id+1))/${#EXPERIMENT_QUEUE[@]}: $method on $dataset (GPU $gpu)"
-        
-        # Run experiment in background and capture its PID
-        (
-            run_experiment "$method" "$dataset" "$gpu" "$exp_id"
-            exit_code=$?
-            
-            # Only generate plots if experiment succeeded
-            if [[ $exit_code -eq 0 ]]; then
-                # Read the experiment directory from the temp file
-                if [[ -f "/tmp/exp_${exp_id}_dir.txt" ]]; then
-                    exp_dir=$(grep "EXPERIMENT_DIR:" "/tmp/exp_${exp_id}_dir.txt" | cut -d: -f2)
-                    rm -f "/tmp/exp_${exp_id}_dir.txt"
-                    
-                    if [[ -n "$exp_dir" && -d "$exp_dir" ]]; then
-                        # Wait a bit to ensure all files are written
-                        sleep 2
-                        
-                        # Check if results.json exists
-                        if [[ -f "$exp_dir/results.json" ]]; then
-                            echo ""
-                            echo "Generating plots for: $exp_dir"
-                            generate_plots_for_experiment "$exp_dir" "$method" "$dataset" "$gpu"
-                        else
-                            echo "Warning: results.json not found in $exp_dir"
-                        fi
-                    else
-                        echo "Warning: Experiment directory not found or invalid: $exp_dir"
-                    fi
-                else
-                    echo "Warning: Could not find experiment directory info for $method on $dataset"
-                fi
-            else
-                echo "Skipping plot generation for failed experiment: $method on $dataset"
-            fi
-        ) &
-        
-        pid=$!
-        running_pids[$gpu]=$pid
-        pid_to_exp[$pid]="$method:$dataset:$gpu"
-        
-        exp_id=$((exp_id + 1))
-        
-        # Small delay to avoid race conditions
-        sleep 2
-    done
-    
-    # Wait for all experiments to complete
-    echo ""
-    echo "Waiting for all experiments to complete..."
-    echo ""
-    
-    completed=0
-    total=${#EXPERIMENT_QUEUE[@]}
-    
-    # Monitor running experiments
-    while [[ $completed -lt $total ]]; do
-        for pid in "${!pid_to_exp[@]}"; do
-            if ! kill -0 $pid 2>/dev/null; then
-                # Process completed
-                exp_info=${pid_to_exp[$pid]}
-                IFS=':' read -r method dataset gpu <<< "$exp_info"
-                
-                wait $pid
-                exit_code=$?
-                
-                if [[ $exit_code -eq 0 ]]; then
-                    echo "✓ Completed: $method on $dataset (GPU $gpu)"
-                else
-                    echo "✗ Failed: $method on $dataset (GPU $gpu)"
-                fi
-                
-                unset pid_to_exp[$pid]
-                completed=$((completed + 1))
-                echo "Progress: $completed/$total experiments completed"
-            fi
-        done
-        
-        # Brief sleep to avoid busy waiting
-        if [[ $completed -lt $total ]]; then
-            sleep 5
+        if ! kill -0 ${pids[$i]} 2>/dev/null; then
+            wait ${pids[$i]}
+            completed=$((completed + 1))
+            echo "Progress: $completed/$total experiments completed"
+            unset pids[$i]
         fi
     done
     
-    echo ""
-    echo "==============================================================="
-    print_success "All queued experiments completed!"
-    echo "==============================================================="
-    
-else
-    # Single experiment mode
-    if [[ -z "$METHOD" || -z "$DATASET" || -z "$GPU_ID" ]]; then
-        print_error "Single experiment mode requires --method, --dataset, and --gpu"
-        echo "Use --help for usage information"
-        exit 1
+    if [[ $completed -lt $total ]]; then
+        sleep 5
     fi
-    
-    # Validate inputs
-    if ! validate_method "$METHOD"; then
-        print_error "Invalid method: $METHOD"
-        exit 1
-    fi
-    
-    if ! validate_dataset "$DATASET"; then
-        print_error "Invalid dataset: $DATASET"
-        exit 1
-    fi
-    
-    if ! [[ "$GPU_ID" =~ ^[0-9]+$ ]]; then
-        print_error "Invalid GPU ID: $GPU_ID"
-        exit 1
-    fi
-    
-    echo "==============================================================="
-    echo "SINGLE EXPERIMENT MODE"
-    echo "==============================================================="
-    
-    run_experiment "$METHOD" "$DATASET" "$GPU_ID" 0
-    
-    echo ""
-    print_success "Single experiment completed!"
-fi 
+done
+
+echo ""
+echo "==============================================================="
+print_success "All experiments completed!"
+echo "==============================================================="
+echo ""
+echo "To compare results, run:"
+echo "  python compare_experiments.py"
