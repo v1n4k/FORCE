@@ -63,7 +63,19 @@ class ExperimentInfo:
     
     def get_display_name(self) -> str:
         """Get a human-readable display name for the experiment."""
-        return f"{self.method:15} | {self.dataset:10} | α={self.alpha:4} | rounds={self.num_rounds:3} | acc={self.best_accuracy:.4f} | {self.timestamp}"
+        # Truncate method name if too long and add abbreviations for common long names
+        method_display = self.method
+        if len(method_display) > 18:
+            # Create abbreviations for common long method names
+            abbreviations = {
+                'soft_constraint+muon': 'soft_constr+muon',
+                'Newton_shulz+muon': 'Newton_sz+muon',
+                'soft_constraint': 'soft_constr',
+                'Newton_shulz': 'Newton_sz'
+            }
+            method_display = abbreviations.get(method_display, method_display[:18])
+        
+        return f"{method_display:18} | {self.dataset:12} | α={self.alpha:4} | R={self.num_rounds:2} | acc={self.best_accuracy:.4f} | {self.timestamp}"
 
 
 def scan_experiments(base_dir: Path = Path("experiments")) -> List[ExperimentInfo]:
@@ -83,54 +95,103 @@ def scan_experiments(base_dir: Path = Path("experiments")) -> List[ExperimentInf
 
 
 def display_experiments(experiments: List[ExperimentInfo]) -> None:
-    """Display experiments in a readable format."""
-    print("\n" + "="*100)
+    """Display experiments in a readable format with grouping."""
+    print("\n" + "="*105)
     print("AVAILABLE EXPERIMENTS")
-    print("="*100)
-    print(f"{'  #':3} | {'Method':15} | {'Dataset':10} | {'Alpha':6} | {'Rounds':10} | {'Accuracy':10} | {'Timestamp':20}")
-    print("-"*100)
+    print("="*105)
+    print(f"{'  #':3} | {'Method':18} | {'Dataset':12} | {'Alpha':6} | {'R':2} | {'Accuracy':8} | {'Timestamp':17}")
+    print("-"*105)
     
+    # Group by dataset and alpha for better readability
+    current_group = None
     for i, exp in enumerate(experiments):
+        group_key = f"{exp.dataset}_α{exp.alpha}"
+        if group_key != current_group:
+            if current_group is not None:
+                print("-"*105)
+            current_group = group_key
+        
         print(f"{i+1:3} | {exp.get_display_name()}")
     
-    print("="*100)
+    print("="*105)
+    
+    # Show summary of available datasets and alphas
+    datasets = list(set(exp.dataset for exp in experiments))
+    alphas = list(set(exp.alpha for exp in experiments if exp.alpha is not None))
+    print(f"\n📊 Summary: {len(experiments)} experiments | Datasets: {sorted(datasets)} | Alpha values: {sorted(alphas)}")
+    print("💡 Note: Only experiments with same dataset, alpha, and rounds can be compared.")
 
 
 def get_user_selections(experiments: List[ExperimentInfo]) -> List[ExperimentInfo]:
     """Get user's experiment selections."""
-    print("\nSelect experiments to compare (e.g., '1,3,5' or '1-5' or 'all'):")
-    selection = input("> ").strip()
+    print("\n" + "="*80)
+    print("🎯 SELECT EXPERIMENTS TO COMPARE")
+    print("="*80)
+    print("Examples:")
+    print("  • Single experiments:     1,3,5")
+    print("  • Range of experiments:   1-5")
+    print("  • All experiments:        all")
+    print("  • Mixed selection:        1,3,7-10,15")
+    print("-"*80)
+    print("💡 Remember: Only experiments with same dataset, alpha, and rounds can be compared!")
+    print("="*80)
     
-    selected_indices = []
-    
-    if selection.lower() == 'all':
-        return experiments
-    
-    # Parse selection
-    for part in selection.split(','):
-        part = part.strip()
-        if '-' in part:
-            # Range selection
-            try:
-                start, end = map(int, part.split('-'))
-                selected_indices.extend(range(start-1, end))
-            except:
-                print(f"Invalid range: {part}")
-        else:
-            # Single selection
-            try:
-                idx = int(part) - 1
-                if 0 <= idx < len(experiments):
-                    selected_indices.append(idx)
-                else:
-                    print(f"Invalid index: {part}")
-            except:
-                print(f"Invalid selection: {part}")
-    
-    # Remove duplicates and sort
-    selected_indices = sorted(list(set(selected_indices)))
-    
-    return [experiments[i] for i in selected_indices]
+    while True:
+        selection = input("Enter your selection > ").strip()
+        
+        if not selection:
+            print("❌ Please enter a selection!")
+            continue
+            
+        selected_indices = []
+        
+        if selection.lower() == 'all':
+            return experiments
+        
+        # Parse selection
+        valid = True
+        for part in selection.split(','):
+            part = part.strip()
+            if '-' in part:
+                # Range selection
+                try:
+                    start, end = map(int, part.split('-'))
+                    if start > end:
+                        print(f"❌ Invalid range: {part} (start > end)")
+                        valid = False
+                        break
+                    selected_indices.extend(range(start-1, end))
+                except:
+                    print(f"❌ Invalid range format: {part}")
+                    valid = False
+                    break
+            else:
+                # Single selection
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < len(experiments):
+                        selected_indices.append(idx)
+                    else:
+                        print(f"❌ Invalid index: {part} (valid range: 1-{len(experiments)})")
+                        valid = False
+                        break
+                except:
+                    print(f"❌ Invalid number: {part}")
+                    valid = False
+                    break
+        
+        if not valid:
+            print("🔄 Please try again with a valid selection.")
+            continue
+            
+        # Remove duplicates and sort
+        selected_indices = sorted(list(set(selected_indices)))
+        
+        if not selected_indices:
+            print("❌ No valid experiments selected!")
+            continue
+            
+        return [experiments[i] for i in selected_indices]
 
 
 def validate_comparability(experiments: List[ExperimentInfo]) -> Tuple[bool, str]:
@@ -266,26 +327,29 @@ def main():
             print("No experiments selected.")
             continue
         
-        print(f"\nSelected {len(selected)} experiments:")
+        print(f"\n✅ Selected {len(selected)} experiments:")
+        print("-"*60)
         for exp in selected:
-            print(f"  - {exp.method} on {exp.dataset} (α={exp.alpha})")
+            print(f"  • {exp.method:20} | {exp.dataset:10} | α={exp.alpha}")
+        print("-"*60)
         
         # Validate comparability
         valid, message = validate_comparability(selected)
         
         if not valid:
-            print(f"\n❌ Cannot compare: {message}")
-            print("\n📋 Comparison Requirements:")
-            print("   1. Same dataset (e.g., all sst2 or all qqp)")
-            print("   2. Same alpha value (same non-IID data distribution)")
-            print("   3. Same number of federated learning rounds")
-            print("\nPlease select experiments that meet ALL these criteria.")
+            print(f"\n❌ COMPARISON ERROR: {message}")
+            print("\n📋 Requirements for comparison:")
+            print("   ✓ Same dataset (e.g., all qnli or all sst2)")
+            print("   ✓ Same alpha value (same data distribution)")
+            print("   ✓ Same number of federated learning rounds")
+            print("\n🔄 Please select experiments that meet ALL these criteria.")
         else:
-            print(f"\n✅ {message}")
+            print(f"\n✅ VALIDATION PASSED: {message}")
             
             # Generate comparison plot
-            print("\nGenerating comparison plot...")
+            print("\n🎨 Generating comparison plot...")
             plot_comparison(selected)
+            print("✅ Comparison completed!")
         
         # Ask if user wants to continue
         print("\nDo you want to compare other experiments? (y/n)")
