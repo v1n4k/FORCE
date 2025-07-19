@@ -30,8 +30,8 @@ print_warning() {
 # ---- GPU STATUS FUNCTIONS ----
 check_gpu_processes() {
     local gpu_id=$1
-    # Check if there are any python processes using the GPU
-    local processes=$(nvidia-smi -i $gpu_id --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | grep -i python | wc -l)
+    # Use nvidia-smi pmon to reliably check for python processes
+    local processes=$(nvidia-smi pmon -c 1 2>/dev/null | grep "^[[:space:]]*$gpu_id" | grep -E "(python|Python)" | wc -l)
     echo $processes
 }
 
@@ -132,8 +132,8 @@ BASE_PORT=12355
 
 # GPU monitoring settings
 GPU_CHECK_INTERVAL=30  # Check GPU status every 30 seconds
-MAX_GPU_MEMORY_PERCENT=85  # Maximum GPU memory usage before considering it "busy"
-MIN_FREE_MEMORY_MB=2000  # Minimum free memory required to start new experiment
+MAX_GPU_MEMORY_PERCENT=99  # Maximum GPU memory usage before considering it "busy" (relaxed since using file locks)
+MIN_FREE_MEMORY_MB=100  # Minimum free memory required to start new experiment (relaxed since using file locks)
 
 # ---- PARSE COMMAND LINE ARGUMENTS ----
 EXPERIMENT_QUEUE=()
@@ -166,8 +166,8 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --config <file>              Configuration file with experiments"
             echo "  --gpu-check-interval <sec>   GPU check interval (default: 30)"
-            echo "  --max-gpu-memory <percent>   Max GPU memory usage (default: 85)"
-            echo "  --min-free-memory <MB>       Min free memory required (default: 2000)"
+            echo "  --max-gpu-memory <percent>   Max GPU memory usage (default: 99)"
+            echo "  --min-free-memory <MB>       Min free memory required (default: 100)"
             echo ""
             echo "Config file format (experiments_config.txt):"
             echo "  method:dataset:gpu_id"
@@ -239,8 +239,9 @@ echo "Config file: $CONFIG_FILE"
 echo "Total experiments: ${#EXPERIMENT_QUEUE[@]}"
 echo ""
 echo "GPU Management:"
-echo "  Max memory usage: ${MAX_GPU_MEMORY_PERCENT}%"
-echo "  Min free memory: ${MIN_FREE_MEMORY_MB}MB"
+echo "  Process-based locking: Enabled (primary protection)"
+echo "  Max memory usage: ${MAX_GPU_MEMORY_PERCENT}% (backup check)"
+echo "  Min free memory: ${MIN_FREE_MEMORY_MB}MB (backup check)"
 echo "  Check interval: ${GPU_CHECK_INTERVAL}s"
 echo ""
 echo "Experiments to run:"
@@ -258,9 +259,19 @@ run_experiment_with_queue() {
     local exp_id=$4
     
     local experiment_name="${method}_${dataset}"
+    local lockfile="/tmp/gpu_lock_${gpu_id}"
     
-    # Wait for GPU to be available
-    wait_for_gpu $gpu_id "$experiment_name"
+    # Use flock for GPU mutual exclusion
+    (
+        flock -x 200
+        echo "  Acquired lock for GPU $gpu_id"
+        
+        # Double-check GPU is available after acquiring lock
+        wait_for_gpu $gpu_id "$experiment_name"
+        
+        # Additional delay after GPU is marked available to ensure proper startup
+        echo "  Waiting 5 seconds for GPU initialization..."
+        sleep 5
     
     echo ""
     echo "==============================================================="
@@ -316,25 +327,33 @@ run_experiment_with_queue() {
     MINUTES=$(( (DURATION % 3600) / 60 ))
     SECONDS=$((DURATION % 60))
     
+    # Get the experiment directory before closing the lock
+    local latest_exp_dir=""
     if [ $RESULT -eq 0 ]; then
         print_success "✓ Completed: $method on $dataset (${HOURS}h ${MINUTES}m ${SECONDS}s)"
-        
-        # Generate plots
+        # Find the latest experiment directory
         local method_dir=$(echo "$method" | tr '+' '_')
-        local exp_dirs=($(ls -dt ${BASE_EXP_DIR}/*${method_dir}_${dataset}* 2>/dev/null))
+        local exp_dirs=($(ls -dt ${BASE_EXP_DIR}/*${method_dir}_${dataset}* ${BASE_EXP_DIR}/alpha_*/*${method_dir}_${dataset}* 2>/dev/null))
         if [[ ${#exp_dirs[@]} -gt 0 ]]; then
-            echo "  Generating plots..."
-            python plotting.py --exp_dir "${exp_dirs[0]}" --output_dir "${exp_dirs[0]}/plots" 2>&1
+            latest_exp_dir="${exp_dirs[0]}"
+            # Add to plot queue for main process to handle
+            echo "$method|$dataset|$latest_exp_dir|$exp_id" >> "/tmp/plot_queue.txt"
         fi
     else
         print_error "✗ Failed: $method on $dataset"
     fi
+    
+    # Release lock by closing file descriptor - this allows next experiment to start
+    ) 200>"$lockfile"
     
     return $RESULT
 }
 
 # ---- MAIN EXECUTION ----
 mkdir -p $BASE_EXP_DIR 2>/dev/null
+
+# Clear plot queue
+rm -f /tmp/plot_queue.txt
 
 # Start all experiments (they will queue automatically)
 declare -a pids
@@ -350,8 +369,8 @@ for exp in "${EXPERIMENT_QUEUE[@]}"; do
     pids+=($!)
     exp_id=$((exp_id + 1))
     
-    # Small delay to avoid race conditions
-    sleep 2
+    # Longer delay to ensure GPU process is properly started
+    sleep 10
 done
 
 # Monitor progress
@@ -385,6 +404,29 @@ echo ""
 echo "==============================================================="
 print_success "All experiments completed!"
 echo "==============================================================="
+
+# Process plot generation queue
+if [ -f "/tmp/plot_queue.txt" ]; then
+    echo ""
+    echo "Generating plots for all experiments..."
+    echo "==============================================================="
+    
+    while IFS='|' read -r method dataset exp_dir exp_id; do
+        if [ -n "$exp_dir" ] && [ -d "$exp_dir" ]; then
+            echo "Generating plots for $method on $dataset..."
+            python plotting.py --exp_dir "$exp_dir" --output_dir "$exp_dir/plots" 2>&1
+            if [ $? -eq 0 ]; then
+                print_success "✓ Plots generated for $method on $dataset"
+            else
+                print_warning "⚠ Plot generation failed for $method on $dataset"
+            fi
+        fi
+    done < "/tmp/plot_queue.txt"
+    
+    rm -f /tmp/plot_queue.txt
+    echo "==============================================================="
+fi
+
 echo ""
 echo "To compare results, run:"
 echo "  python compare_experiments.py"
