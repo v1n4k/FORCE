@@ -18,7 +18,7 @@ This codebase provides a comprehensive federated learning experiment framework w
 
 ```
 FORCE/
-├── main.py                 # Main experiment runner with federated learning logic
+├── main.py                # Main experiment runner with federated learning logic
 ├── client.py              # FORCE and baseline client implementations
 ├── server.py              # Federated learning server for model aggregation
 ├── data_utils.py          # GLUE dataset loading and preprocessing
