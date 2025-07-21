@@ -92,7 +92,6 @@ dependencies:
   - patsy=1.0.1=pyhd8ed1ab_1
   - pcre2=10.44=hc749103_2
   - pillow=11.3.0=py310h7e6dc6c_0
-  - pip=25.0.1=pyh8b19718_0
   - pixman=0.46.2=h29eaf8c_0
   - pthread-stubs=0.4=hb9d3cd8_1002
   - pyparsing=3.2.3=pyhd8ed1ab_1
@@ -134,6 +133,7 @@ dependencies:
   - xorg-libxtst=1.2.5=hb9d3cd8_3
   - xorg-libxxf86vm=1.1.6=hb9d3cd8_0
   - zstd=1.5.7=hb8e6e7a_2
+  - pip
   - pip:
       - accelerate==1.6.0
       - aiohappyeyeballs==2.6.1
@@ -213,3 +213,4 @@ dependencies:
       - wandb==0.19.9
       - xxhash==3.5.0
       - yarl==1.19.0
+      - --extra-index-url https://download.pytorch.org/whl/cu121
