@@ -6,12 +6,12 @@ Allows users to select experiments and generate comparison plots.
 
 import json
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 
 
 class ExperimentInfo:
@@ -221,83 +221,222 @@ def validate_comparability(experiments: List[ExperimentInfo]) -> Tuple[bool, str
     return True, f"All experiments are comparable: Dataset={dataset}, Alpha={alpha}, Rounds={num_rounds}"
 
 
-def plot_comparison(experiments: List[ExperimentInfo], save_path: Optional[str] = None) -> None:
-    """Generate comparison plot for selected experiments."""
-    plt.figure(figsize=(12, 8))
+def get_display_method_name(method_name: str) -> str:
+    """Map internal method names to display names for legends."""
+    method_mapping = {
+        'QR+muon': 'FORCE(QR)',
+        'Newton_shulz+muon': 'FORCE(NS)',
+        'soft_constraint+muon': 'FORCE',
+        'ffa_lora': 'FFA-LoRA',
+        'lora': 'FedIT'
+    }
+    return method_mapping.get(method_name, method_name)
+
+
+def get_method_color(method_name: str) -> str:
+    """Map method names to consistent colors across all plots."""
+    color_mapping = {
+        'QR+muon': 'tab:blue',
+        'Newton_shulz+muon': 'tab:orange', 
+        'soft_constraint+muon': 'tab:green',
+        'ffa_lora': 'tab:red',
+        'lora': 'tab:purple'
+    }
+    return color_mapping.get(method_name, 'tab:gray')
+
+
+def get_subplot_params() -> Optional[Tuple[int, int]]:
+    """Ask user if they want to add a subplot and get the range parameters."""
+    while True:
+        choice = input("\n🔍 Do you want to add a zoomed subplot to highlight differences? (y/n) > ").strip().lower()
+        if choice in ['y', 'yes']:
+            print("\n📊 Subplot will zoom into a specific range of rounds to magnify differences.")
+            try:
+                start_round = int(input("Enter start round for subplot (e.g., 12) > ").strip())
+                end_round = int(input("Enter end round for subplot (e.g., 15) > ").strip())
+                
+                if start_round >= end_round:
+                    print("❌ Start round must be less than end round!")
+                    continue
+                if start_round < 1:
+                    print("❌ Start round must be at least 1!")
+                    continue
+                    
+                return (start_round, end_round)
+            except ValueError:
+                print("❌ Please enter valid integer values!")
+                continue
+        elif choice in ['n', 'no']:
+            return None
+        else:
+            print("❌ Please enter 'y' for yes or 'n' for no!")
+
+
+def create_single_plot(experiments: List[ExperimentInfo], plot_type: str, title_suffix: str, subplot_range: Optional[Tuple[int, int]] = None):
+    """Create a single comparison plot for the given experiments and plot type.
     
-    # Color palette for different methods
-    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple', 
-              'tab:brown', 'tab:pink', 'tab:gray', 'tab:olive', 'tab:cyan']
+    Args:
+        experiments: List of experiment info objects
+        plot_type: 'matched', 'mismatched', or 'standard'
+        title_suffix: Suffix for the plot title
+        subplot_range: Optional tuple (start_round, end_round) for zoomed subplot
     
-    # Check if this is MNLI dataset
+    Returns:
+        The matplotlib figure object
+    """
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Colors will be assigned based on method name for consistency
+    
     dataset = experiments[0].dataset
-    is_mnli = dataset in ['mnli_matched', 'mnli_mismatched']
+    alpha = experiments[0].alpha
     
-    for i, exp in enumerate(experiments):
+    # Store data for subplot if needed
+    subplot_data = []
+    
+    for exp in experiments:
         if not exp.results or 'rounds' not in exp.results:
             print(f"Warning: No round data for {exp.method}")
             continue
         
         # Extract round data
         rounds = [r["round"] for r in exp.results["rounds"]]
-        accuracies = [r["accuracy"] for r in exp.results["rounds"]]
         
-        if is_mnli and "auxiliary_accuracy" in exp.results["rounds"][0]:
-            # For MNLI, plot both matched and mismatched
-            auxiliary_accs = [r.get("auxiliary_accuracy", 0) for r in exp.results["rounds"]]
-            
-            # Determine which is primary
+        # Choose which accuracy to plot based on plot_type
+        if plot_type == 'matched':
+            # For MNLI matched plot
             primary_type = exp.results.get('primary_eval_type', 'standard')
-            
-            if primary_type == 'mismatched':
-                # Primary is mismatched, auxiliary is matched
-                plt.plot(rounds, accuracies, '-o', linewidth=2, markersize=6, 
-                        color=colors[i % len(colors)], label=f'{exp.method} (Mismatched)', alpha=0.8)
-                plt.plot(rounds, auxiliary_accs, '--s', linewidth=2, markersize=6, 
-                        color=colors[i % len(colors)], label=f'{exp.method} (Matched)', alpha=0.6)
+            if primary_type == 'matched':
+                accuracies = [r["accuracy"] for r in exp.results["rounds"]]
             else:
-                # Primary is matched, auxiliary is mismatched
-                plt.plot(rounds, accuracies, '-o', linewidth=2, markersize=6, 
-                        color=colors[i % len(colors)], label=f'{exp.method} (Matched)', alpha=0.8)
-                plt.plot(rounds, auxiliary_accs, '--s', linewidth=2, markersize=6, 
-                        color=colors[i % len(colors)], label=f'{exp.method} (Mismatched)', alpha=0.6)
+                accuracies = [r.get("auxiliary_accuracy", 0) for r in exp.results["rounds"]]
+        elif plot_type == 'mismatched':
+            # For MNLI mismatched plot
+            primary_type = exp.results.get('primary_eval_type', 'standard')
+            if primary_type == 'mismatched':
+                accuracies = [r["accuracy"] for r in exp.results["rounds"]]
+            else:
+                accuracies = [r.get("auxiliary_accuracy", 0) for r in exp.results["rounds"]]
         else:
-            # Non-MNLI dataset, plot single curve
-            plt.plot(rounds, accuracies, '-o', linewidth=2, markersize=6, 
-                    color=colors[i % len(colors)], label=exp.method, alpha=0.8)
+            # For standard (non-MNLI) datasets
+            accuracies = [r["accuracy"] for r in exp.results["rounds"]]
+        
+        # Get consistent color for this method
+        method_color = get_method_color(exp.method)
+        
+        # Plot the main curve
+        ax.plot(rounds, accuracies, '-o', linewidth=2, markersize=6, 
+               color=method_color, label=get_display_method_name(exp.method), alpha=0.8)
+        
+        # Store data for subplot
+        if subplot_range:
+            subplot_data.append((rounds, accuracies, method_color, exp.method))
     
-    # Configure plot
-    ax = plt.gca()
+    # Configure main plot
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel('Federated Learning Round', fontsize=16)
+    ax.set_ylabel('Accuracy', fontsize=16)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_title(f'Method Comparison on {title_suffix} (α={alpha})', fontsize=20, fontweight='bold')
+    ax.legend(loc='best', fontsize=20)
+    ax.grid(True, alpha=0.3)
     
-    plt.xlabel('Federated Learning Round', fontsize=14)
-    plt.ylabel('Accuracy', fontsize=14)
+    # Add subplot if requested
+    if subplot_range and subplot_data:
+        start_round, end_round = subplot_range
+        
+        # Determine optimal subplot position based on data distribution
+        # Check if curves are generally increasing (typical case)
+        avg_start_accuracy = sum(data[1][0] for data in subplot_data if data[1]) / len([d for d in subplot_data if d[1]])
+        avg_end_accuracy = sum(data[1][-1] for data in subplot_data if data[1]) / len([d for d in subplot_data if d[1]])
+        
+        if avg_end_accuracy > avg_start_accuracy + 0.05:  # Curves are increasing significantly
+            # Place subplot in lower left where there's typically more space
+            subplot_loc = 'lower left'
+            bbox_anchor = (0.18, 0.05, 1, 1)
+        else:
+            # For flat or decreasing curves, place in upper left
+            subplot_loc = 'upper left'
+            bbox_anchor = (0.05, 0.70, 1, 1)
+        
+        # Create inset axes for subplot
+        axins = inset_axes(ax, width="55%", height="55%", loc=subplot_loc, 
+                          bbox_to_anchor=bbox_anchor, bbox_transform=ax.transAxes)
+        
+        # Plot data in subplot
+        for rounds, accuracies, color, method in subplot_data:
+            # Filter data for the specified range
+            filtered_rounds = []
+            filtered_accs = []
+            for r, acc in zip(rounds, accuracies):
+                if start_round <= r <= end_round:
+                    filtered_rounds.append(r)
+                    filtered_accs.append(acc)
+            
+            if filtered_rounds:  # Only plot if there's data in the range
+                axins.plot(filtered_rounds, filtered_accs, '-o', linewidth=1.5, markersize=4, 
+                          color=color, alpha=0.8)
+        
+        # Configure subplot
+        axins.set_xlim(start_round, end_round)
+        axins.xaxis.set_major_locator(MaxNLocator(integer=True))
+        axins.grid(True, alpha=0.3)
+        axins.tick_params(axis='both', which='major', labelsize=10)
+        axins.set_title(f'Rounds {start_round}-{end_round}', fontsize=12)
+        
+        # Add indication lines from main plot to subplot
+        mark_inset(ax, axins, loc1=2, loc2=4, fc="none", ec="gray", alpha=0.5)
     
-    # Title with experiment details
-    alpha = experiments[0].alpha
-    if is_mnli:
-        plt.title(f'Method Comparison on MNLI (Matched & Mismatched) (α={alpha})', fontsize=16, fontweight='bold')
-    else:
-        plt.title(f'Method Comparison on {dataset} (α={alpha})', fontsize=16, fontweight='bold')
-    
-    plt.legend(loc='best', fontsize=12)
-    plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    return fig
+
+
+def plot_comparison(experiments: List[ExperimentInfo], save_path: Optional[str] = None) -> None:
+    """Generate comparison plot(s) for selected experiments."""
+    dataset = experiments[0].dataset
+    alpha = experiments[0].alpha
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Save plot
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\nPlot saved to: {save_path}")
+    # Check if this is MNLI dataset
+    is_mnli = dataset in ['mnli_matched', 'mnli_mismatched']
+    
+    # Ask user about subplot functionality
+    subplot_range = get_subplot_params()
+    
+    if is_mnli:
+        # Create separate plots for matched and mismatched
+        print("\n🎨 Generating separate plots for MNLI matched and mismatched...")
+        
+        # Matched plot
+        fig_matched = create_single_plot(experiments, 'matched', 'MNLI Matched', subplot_range)
+        if save_path:
+            matched_path = save_path.replace('.png', '_matched.png')
+        else:
+            matched_path = f"comparison_mnli_matched_alpha{alpha}_{timestamp}.png"
+        fig_matched.savefig(matched_path, dpi=300, bbox_inches='tight')
+        print(f"\n📊 Matched plot saved to: {matched_path}")
+        
+        # Mismatched plot
+        fig_mismatched = create_single_plot(experiments, 'mismatched', 'MNLI Mismatched', subplot_range)
+        if save_path:
+            mismatched_path = save_path.replace('.png', '_mismatched.png')
+        else:
+            mismatched_path = f"comparison_mnli_mismatched_alpha{alpha}_{timestamp}.png"
+        fig_mismatched.savefig(mismatched_path, dpi=300, bbox_inches='tight')
+        print(f"📊 Mismatched plot saved to: {mismatched_path}")
+        
+        plt.show()
+        
     else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if is_mnli:
-            filename = f"comparison_mnli_alpha{alpha}_{timestamp}.png"
+        # Single plot for non-MNLI datasets
+        fig = create_single_plot(experiments, 'standard', dataset, subplot_range)
+        if save_path:
+            filename = save_path
         else:
             filename = f"comparison_{dataset}_alpha{alpha}_{timestamp}.png"
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        fig.savefig(filename, dpi=300, bbox_inches='tight')
         print(f"\nPlot saved to: {filename}")
-    
-    plt.show()
+        plt.show()
 
 
 def main():
