@@ -838,7 +838,7 @@ def main():
     
     # Dataset and model
     parser.add_argument("--dataset", type=str, required=True,
-                        choices=["sst2", "qqp", "qnli", "mnli_matched", "mnli_mismatched"],
+                        choices=["sst2", "cola", "qqp", "qnli", "mnli_matched", "mnli_mismatched"],
                         help="GLUE dataset to use")
     parser.add_argument("--model_name", type=str, default="roberta-base",
                         help="Pretrained model name from HuggingFace")
