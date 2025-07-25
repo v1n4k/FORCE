@@ -729,15 +729,30 @@ def run_federated_learning(args, exp_dir):
         
         # Evaluate global model
         eval_results = server.evaluate(eval_dataloader, metric=metric)
-        round_results["accuracy"] = eval_results.get("accuracy", 0.0) if eval_results else 0.0
+        if eval_results:
+            # Store all metrics returned by the evaluator
+            for metric_name, metric_value in eval_results.items():
+                round_results[metric_name] = metric_value
+            # Ensure backward compatibility with accuracy
+            if "accuracy" not in eval_results and "matthews_correlation" in eval_results:
+                round_results["accuracy"] = eval_results["matthews_correlation"]
+        else:
+            round_results["accuracy"] = 0.0
         
         # Evaluate on auxiliary set if MNLI
         if auxiliary_eval_dataloader is not None:
             auxiliary_results = server.evaluate(auxiliary_eval_dataloader, metric=metric)
-            round_results["auxiliary_accuracy"] = auxiliary_results.get("accuracy", 0.0) if auxiliary_results else 0.0
+            if auxiliary_results:
+                # Store auxiliary metrics with prefix
+                for metric_name, metric_value in auxiliary_results.items():
+                    round_results[f"auxiliary_{metric_name}"] = metric_value
+                # Ensure backward compatibility
+                round_results["auxiliary_accuracy"] = auxiliary_results.get("accuracy", auxiliary_results.get("matthews_correlation", 0.0))
+            else:
+                round_results["auxiliary_accuracy"] = 0.0
             # Also store with specific names for clarity
             round_results[f"{auxiliary_eval_name}_accuracy"] = round_results["auxiliary_accuracy"]
-            round_results[f"{primary_eval_name}_accuracy"] = round_results["accuracy"]
+            round_results[f"{primary_eval_name}_accuracy"] = round_results.get("accuracy", 0.0)
         
         # Update best results based on primary evaluation metric
         if round_results["accuracy"] > results["best_accuracy"]:

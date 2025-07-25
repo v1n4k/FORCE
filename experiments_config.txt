@@ -15,15 +15,9 @@
 
 
 # Baseline methods for comparison
-lora:qnli:0
-ffa_lora:qnli:1
-soft_constraint:qnli:2
-QR:qnli:3
-soft_constraint+muon:qnli:0
-QR+muon:qnli:1
-lora:mnli_matched:2
-ffa_lora:mnli_matched:3
-soft_constraint+muon:mnli_matched:0
-Newton_shulz+muon:mnli_matched:1
-QR+muon:mnli_matched:2
+lora:qqp:0
+ffa_lora:qqp:0
+soft_constraint+muon:qqp:0
+Newton_shulz+muon:qqp:0
+QR+muon:qqp:0
 

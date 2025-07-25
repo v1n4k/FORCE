@@ -187,3 +187,6 @@ logs/
 config.ini
 secrets.json
 .env.local 
+
+*.md
+plot/

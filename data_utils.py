@@ -32,6 +32,8 @@ def tokenize_function(examples, tokenizer, dataset_name):
     # Dataset-specific tokenization
     if dataset_name == "sst2":
         outputs = tokenizer(examples["sentence"], truncation=True, max_length=None)
+    elif dataset_name == "cola":
+        outputs = tokenizer(examples["sentence"], truncation=True, max_length=None)
     elif dataset_name == "qnli":
         outputs = tokenizer(examples["question"], examples["sentence"], truncation=True, max_length=None)
     elif dataset_name == "qqp":
@@ -72,6 +74,8 @@ def load_glue_dataset(dataset_name, model_name_or_path="roberta-base", batch_siz
     
     # Determine columns to remove based on dataset
     if dataset_name == "sst2":
+        remove_columns = ["idx", "sentence"]
+    elif dataset_name == "cola":
         remove_columns = ["idx", "sentence"]
     elif dataset_name == "qqp":
         remove_columns = ["idx", "question1", "question2"]
