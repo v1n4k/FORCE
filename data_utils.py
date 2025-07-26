@@ -267,7 +267,14 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
         for i, subset in enumerate(client_subsets):
             # Get indices and labels for stratified splitting
             subset_indices = list(range(len(subset)))
-            subset_labels = [subset[idx]['labels'].item() for idx in subset_indices]
+            # Handle both tensor and integer labels
+            subset_labels = []
+            for idx in subset_indices:
+                label = subset[idx]['labels']
+                if hasattr(label, 'item'):
+                    subset_labels.append(label.item())
+                else:
+                    subset_labels.append(label)
             
             # Stratified split to maintain label distribution
             train_indices, val_indices = train_test_split(

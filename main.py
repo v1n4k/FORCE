@@ -638,6 +638,7 @@ def run_federated_learning(args, exp_dir):
         # All clients use the same training data
         client_data_splits = [train_dataloader for _ in range(args.num_clients)]
         distribution_analysis = None
+        client_val_dataloaders = None  # No client validation data in simple mode
     
     # Determine if using FORCE or baseline method
     is_force_method = args.method in ["soft_constraint", "Newton_shulz", "QR", "muon", 

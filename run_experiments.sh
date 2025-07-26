@@ -118,7 +118,7 @@ NUM_EPOCHS=2
 NUM_ROUNDS=15
 NUM_CLIENTS=8
 LEARNING_RATE=3e-4
-LORA_RANK=16
+LORA_RANK=4
 LORA_ALPHA=16
 LORA_DROPOUT=0.1
 BATCH_SIZE=32
@@ -130,7 +130,7 @@ BASE_EXP_DIR="experiments"
 SEED=42
 ENABLE_FEDERATED_SPLIT="--enable_federated_split"
 # Client evaluation parameters (disabled by default for backward compatibility)
-ENABLE_CLIENT_EVALUATION=""  # Set to "--enable_client_evaluation" to enable
+ENABLE_CLIENT_EVALUATION="--enable_client_evaluation"  # Set to "--enable_client_evaluation" to enable
 CLIENT_VALIDATION_RATIO=0.2  # Ratio of client data to use for validation
 BASE_PORT=12355
 
