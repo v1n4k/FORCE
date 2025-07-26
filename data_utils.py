@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 import evaluate
 from data_distribution import (
     dirichlet_non_iid_split, 
+    biased_dirichlet_split,
     analyze_data_distribution, 
     visualize_data_distribution,
     save_distribution_analysis,
@@ -141,20 +142,25 @@ def load_glue_dataset(dataset_name, model_name_or_path="roberta-base", batch_siz
 
 def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="roberta-base", 
                                 batch_size=32, alpha=0.5, seed=42, save_dir=None, 
-                                client_validation_ratio=None):
+                                client_validation_ratio=None, client_quotas=None, client_alphas=None):
     """
     Load GLUE dataset with non-IID federated splits and data distribution visualization.
+    Supports biased client scenarios with configurable data quotas and individual alpha values.
     
     Args:
         dataset_name: Name of the GLUE dataset to load
         num_clients: Number of federated learning clients
         model_name_or_path: Model name for tokenizer initialization
         batch_size: Batch size for DataLoaders
-        alpha: Dirichlet distribution parameter (lower = more non-IID)
+        alpha: Dirichlet distribution parameter (lower = more non-IID) - used when client_alphas is None
         seed: Random seed for reproducibility
         save_dir: Directory to save distribution analysis and visualizations
         client_validation_ratio: Ratio of each client's data to use for validation (0.0-1.0)
                                If None, clients get only training data (original behavior)
+        client_quotas: List of data proportions for each client (must sum to 1.0)
+                      If None, uses equal split. Enables biased client scenarios.
+        client_alphas: List of Dirichlet alpha values for each client
+                      If None, uses alpha parameter for all clients. Enables per-client label skew control.
         
     Returns:
         client_dataloaders: List of training DataLoaders for each client
@@ -178,12 +184,23 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
     train_dataset = train_dataloader.dataset
     
     # Create non-IID splits using Dirichlet distribution
-    client_indices = dirichlet_non_iid_split(
-        dataset=train_dataset,
-        num_clients=num_clients,
-        alpha=alpha,
-        seed=seed
-    )
+    # Use biased split if client_quotas or client_alphas are provided
+    if client_quotas is not None or client_alphas is not None:
+        client_indices = biased_dirichlet_split(
+            dataset=train_dataset,
+            num_clients=num_clients,
+            client_quotas=client_quotas,
+            client_alphas=client_alphas,
+            seed=seed
+        )
+    else:
+        # Standard Dirichlet split (original behavior)
+        client_indices = dirichlet_non_iid_split(
+            dataset=train_dataset,
+            num_clients=num_clients,
+            alpha=alpha,
+            seed=seed
+        )
     
     # Analyze data distribution
     distribution_analysis = analyze_data_distribution(
@@ -196,6 +213,24 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
     distribution_analysis['alpha'] = alpha
     distribution_analysis['seed'] = seed
     distribution_analysis['num_clients'] = num_clients
+    
+    # Add bias configuration if biased parameters were used
+    if client_quotas is not None or client_alphas is not None:
+        import numpy as np
+        bias_config = {
+            'client_quotas': client_quotas if client_quotas is not None else [1.0/num_clients] * num_clients,
+            'client_alphas': client_alphas if client_alphas is not None else [alpha] * num_clients,
+        }
+        # Calculate bias metrics
+        quotas = bias_config['client_quotas']
+        alphas = bias_config['client_alphas']
+        bias_config['quota_variance'] = float(np.var(quotas))
+        bias_config['alpha_variance'] = float(np.var(alphas))
+        bias_config['max_quota_ratio'] = float(max(quotas) / min(quotas))
+        bias_config['min_alpha'] = float(min(alphas))
+        bias_config['max_alpha'] = float(max(alphas))
+        
+        distribution_analysis['bias_configuration'] = bias_config
     
     # Save analysis and create visualizations if save_dir is provided
     if save_dir is not None:

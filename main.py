@@ -587,6 +587,37 @@ def run_federated_learning(args, exp_dir):
         if args.enable_client_evaluation:
             exp_logger.info(f"Client evaluation enabled with validation ratio: {client_val_ratio}")
         
+        # Process biased client parameters (only when client evaluation is enabled)
+        client_quotas = None
+        client_alphas = None
+        if args.enable_client_evaluation:
+            if args.client_quotas is not None:
+                try:
+                    client_quotas = [float(x.strip()) for x in args.client_quotas.split(',')]
+                    if len(client_quotas) != args.num_clients:
+                        raise ValueError(f"client_quotas length ({len(client_quotas)}) must equal num_clients ({args.num_clients})")
+                    if abs(sum(client_quotas) - 1.0) > 1e-6:
+                        raise ValueError(f"client_quotas must sum to 1.0, got {sum(client_quotas)}")
+                    if any(q <= 0 for q in client_quotas):
+                        raise ValueError("All client_quotas must be positive")
+                    exp_logger.info(f"Using custom client quotas: {client_quotas}")
+                except Exception as e:
+                    raise ValueError(f"Invalid client_quotas format: {e}")
+            
+            if args.client_alphas is not None:
+                try:
+                    client_alphas = [float(x.strip()) for x in args.client_alphas.split(',')]
+                    if len(client_alphas) != args.num_clients:
+                        raise ValueError(f"client_alphas length ({len(client_alphas)}) must equal num_clients ({args.num_clients})")
+                    if any(a <= 0 for a in client_alphas):
+                        raise ValueError("All client_alphas must be positive")
+                    exp_logger.info(f"Using custom client alphas: {client_alphas}")
+                except Exception as e:
+                    raise ValueError(f"Invalid client_alphas format: {e}")
+            
+            if client_quotas is not None or client_alphas is not None:
+                exp_logger.info("Biased client scenario enabled")
+        
         dataset_result = load_federated_glue_dataset(
             dataset_name=args.dataset,
             num_clients=args.num_clients,
@@ -595,7 +626,9 @@ def run_federated_learning(args, exp_dir):
             alpha=args.alpha,
             seed=data_seed,  # Use data_seed for data distribution
             save_dir=exp_dir,
-            client_validation_ratio=client_val_ratio
+            client_validation_ratio=client_val_ratio,
+            client_quotas=client_quotas,
+            client_alphas=client_alphas
         )
         
         # Unpack federated dataset results based on client evaluation
@@ -949,6 +982,12 @@ def main():
                         help="Enable client-side evaluation on local validation data")
     parser.add_argument("--client_validation_ratio", type=float, default=0.2,
                         help="Ratio of each client's data to use for validation (0.0-1.0)")
+    
+    # Biased client parameters (only effective when client evaluation is enabled)
+    parser.add_argument("--client_quotas", type=str, default=None,
+                        help="Comma-separated data quotas per client (e.g., '0.6,0.1,0.1,0.1,0.1'). Must sum to 1.0. Only used with --enable_client_evaluation.")
+    parser.add_argument("--client_alphas", type=str, default=None,
+                        help="Comma-separated Dirichlet alpha values per client (e.g., '0.3,10.0,10.0,10.0,10.0'). Only used with --enable_client_evaluation.")
     
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")

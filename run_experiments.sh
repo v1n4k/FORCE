@@ -132,6 +132,9 @@ ENABLE_FEDERATED_SPLIT="--enable_federated_split"
 # Client evaluation parameters (disabled by default for backward compatibility)
 ENABLE_CLIENT_EVALUATION="--enable_client_evaluation"  # Set to "--enable_client_evaluation" to enable
 CLIENT_VALIDATION_RATIO=0.2  # Ratio of client data to use for validation
+# Biased client parameters (only effective when ENABLE_CLIENT_EVALUATION is set)
+CLIENT_QUOTAS=""  # e.g., "0.6,0.1,0.1,0.1,0.1" for dominant client scenario
+CLIENT_ALPHAS=""  # e.g., "0.3,10.0,10.0,10.0,10.0" for mixed skew scenario
 BASE_PORT=12355
 
 # GPU monitoring settings
@@ -322,7 +325,9 @@ run_experiment_with_queue() {
         --exp_dir "$BASE_EXP_DIR" \
         $ENABLE_FEDERATED_SPLIT \
         $ENABLE_CLIENT_EVALUATION \
-        --client_validation_ratio $CLIENT_VALIDATION_RATIO
+        --client_validation_ratio $CLIENT_VALIDATION_RATIO \
+        $([ -n "$CLIENT_QUOTAS" ] && echo "--client_quotas $CLIENT_QUOTAS") \
+        $([ -n "$CLIENT_ALPHAS" ] && echo "--client_alphas $CLIENT_ALPHAS")
     
     RESULT=$?
     

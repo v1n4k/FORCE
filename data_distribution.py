@@ -78,6 +78,126 @@ def dirichlet_non_iid_split(dataset, num_clients: int, alpha: float = 0.5, seed:
     return client_indices
 
 
+def biased_dirichlet_split(dataset, num_clients: int, 
+                          client_quotas: List[float] = None,
+                          client_alphas: List[float] = None,
+                          seed: int = 42) -> List[List[int]]:
+    """
+    Create biased non-IID data split with configurable client quotas and individual alpha values.
+    
+    Enables research scenarios like:
+    - Dominant client with large data share but highly skewed labels
+    - Multiple balanced clients with smaller data shares but uniform labels
+    
+    Args:
+        dataset: The dataset to split
+        num_clients: Number of clients
+        client_quotas: Data proportion for each client (must sum to 1.0)
+                      If None, uses equal split [1/num_clients, ...]
+        client_alphas: Dirichlet alpha value for each client
+                      If None, uses standard alpha=0.5 for all clients
+        seed: Random seed for reproducibility
+        
+    Returns:
+        client_indices: List of data indices for each client
+        
+    Example:
+        # Client 0: 60% data with high skew (α=0.3)
+        # Others: 10% each with balanced labels (α=10.0)
+        quotas = [0.6, 0.1, 0.1, 0.1, 0.1]
+        alphas = [0.3, 10.0, 10.0, 10.0, 10.0]
+        indices = biased_dirichlet_split(dataset, 5, quotas, alphas)
+    """
+    np.random.seed(seed)
+    
+    # Validate and set default parameters
+    if client_quotas is None:
+        client_quotas = [1.0 / num_clients] * num_clients
+    if client_alphas is None:
+        client_alphas = [0.5] * num_clients
+        
+    # Validation
+    if len(client_quotas) != num_clients:
+        raise ValueError(f"client_quotas length ({len(client_quotas)}) must equal num_clients ({num_clients})")
+    if len(client_alphas) != num_clients:
+        raise ValueError(f"client_alphas length ({len(client_alphas)}) must equal num_clients ({num_clients})")
+    if abs(sum(client_quotas) - 1.0) > 1e-6:
+        raise ValueError(f"client_quotas must sum to 1.0, got {sum(client_quotas)}")
+    if any(q <= 0 for q in client_quotas):
+        raise ValueError("All client_quotas must be positive")
+    if any(a <= 0 for a in client_alphas):
+        raise ValueError("All client_alphas must be positive")
+    
+    # Get labels from dataset
+    if hasattr(dataset, 'targets'):
+        labels = np.array(dataset.targets)
+    elif hasattr(dataset, 'labels'):
+        labels = np.array(dataset.labels)
+    else:
+        # For HuggingFace datasets
+        labels = np.array([example['labels'] for example in dataset])
+    
+    num_classes = len(np.unique(labels))
+    num_samples = len(labels)
+    
+    # Calculate target samples per client based on quotas
+    target_client_sizes = [int(quota * num_samples) for quota in client_quotas]
+    
+    # Initialize client indices
+    client_indices = [[] for _ in range(num_clients)]
+    
+    # For each class, distribute data according to each client's alpha and quota
+    for class_id in range(num_classes):
+        # Get indices of samples belonging to this class
+        class_indices = np.where(labels == class_id)[0]
+        np.random.shuffle(class_indices)
+        class_size = len(class_indices)
+        
+        # Calculate how many samples each client should get from this class
+        # This considers both quota (how much data they get) and alpha (how skewed their distribution is)
+        
+        # Step 1: For each client, sample from Dirichlet to get their preference for this class
+        client_class_preferences = []
+        for client_id in range(num_clients):
+            # Each client has their own alpha - lower alpha = more skewed preferences
+            alpha_vec = np.repeat(client_alphas[client_id], num_classes)
+            preference = np.random.dirichlet(alpha_vec)[class_id]
+            client_class_preferences.append(preference)
+        
+        # Step 2: Normalize preferences by client quotas to get actual allocations
+        total_preference_weighted = sum(pref * quota for pref, quota in zip(client_class_preferences, client_quotas))
+        
+        if total_preference_weighted > 0:
+            client_class_allocations = []
+            for client_id in range(num_clients):
+                allocation = (client_class_preferences[client_id] * client_quotas[client_id] / total_preference_weighted) * class_size
+                client_class_allocations.append(int(allocation))
+            
+            # Handle rounding errors - distribute remaining samples
+            allocated_total = sum(client_class_allocations)
+            remaining = class_size - allocated_total
+            for i in range(remaining):
+                client_class_allocations[i % num_clients] += 1
+        else:
+            # Fallback: distribute equally
+            client_class_allocations = [class_size // num_clients] * num_clients
+            for i in range(class_size % num_clients):
+                client_class_allocations[i] += 1
+        
+        # Step 3: Assign class samples to clients
+        start_idx = 0
+        for client_id, allocation in enumerate(client_class_allocations):
+            end_idx = start_idx + allocation
+            client_indices[client_id].extend(class_indices[start_idx:end_idx].tolist())
+            start_idx = end_idx
+    
+    # Shuffle each client's data to mix classes
+    for client_id in range(num_clients):
+        np.random.shuffle(client_indices[client_id])
+    
+    return client_indices
+
+
 def analyze_data_distribution(dataset, client_indices: List[List[int]], 
                             dataset_name: str) -> Dict[str, any]:
     """
