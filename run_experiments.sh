@@ -8,6 +8,7 @@
 # - Automatic experiment status monitoring
 # - Configuration file support for batch experiments
 # - Automatic plot generation after completion
+# - Client-side evaluation support (disabled by default)
 # ===============================================================
 
 # ---- HELPER FUNCTIONS ----
@@ -128,6 +129,9 @@ MODEL_NAME="roberta-base"
 BASE_EXP_DIR="experiments"
 SEED=42
 ENABLE_FEDERATED_SPLIT="--enable_federated_split"
+# Client evaluation parameters (disabled by default for backward compatibility)
+ENABLE_CLIENT_EVALUATION=""  # Set to "--enable_client_evaluation" to enable
+CLIENT_VALIDATION_RATIO=0.2  # Ratio of client data to use for validation
 BASE_PORT=12355
 
 # GPU monitoring settings
@@ -316,7 +320,9 @@ run_experiment_with_queue() {
         --model_seed $model_seed \
         --cuda_device 0 \
         --exp_dir "$BASE_EXP_DIR" \
-        $ENABLE_FEDERATED_SPLIT
+        $ENABLE_FEDERATED_SPLIT \
+        $ENABLE_CLIENT_EVALUATION \
+        --client_validation_ratio $CLIENT_VALIDATION_RATIO
     
     RESULT=$?
     

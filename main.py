@@ -581,6 +581,12 @@ def run_federated_learning(args, exp_dir):
     
     if args.enable_federated_split:
         exp_logger.info(f"Using federated non-IID data splitting with alpha={args.alpha}")
+        
+        # Determine if client evaluation is enabled
+        client_val_ratio = args.client_validation_ratio if args.enable_client_evaluation else None
+        if args.enable_client_evaluation:
+            exp_logger.info(f"Client evaluation enabled with validation ratio: {client_val_ratio}")
+        
         dataset_result = load_federated_glue_dataset(
             dataset_name=args.dataset,
             num_clients=args.num_clients,
@@ -588,15 +594,26 @@ def run_federated_learning(args, exp_dir):
             batch_size=args.batch_size,
             alpha=args.alpha,
             seed=data_seed,  # Use data_seed for data distribution
-            save_dir=exp_dir
+            save_dir=exp_dir,
+            client_validation_ratio=client_val_ratio
         )
         
-        # Unpack federated dataset results
-        if len(dataset_result) == 5:
-            client_data_splits, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis = dataset_result
+        # Unpack federated dataset results based on client evaluation
+        if args.enable_client_evaluation:
+            # With client evaluation: expect client_val_dataloaders in results
+            if len(dataset_result) == 6:
+                client_data_splits, client_val_dataloaders, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis = dataset_result
+            else:
+                client_data_splits, client_val_dataloaders, eval_dataloader, metric, distribution_analysis = dataset_result
+                auxiliary_eval_dataloader = None
         else:
-            client_data_splits, eval_dataloader, metric, distribution_analysis = dataset_result
-            auxiliary_eval_dataloader = None
+            # Without client evaluation: original behavior
+            if len(dataset_result) == 5:
+                client_data_splits, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis = dataset_result
+            else:
+                client_data_splits, eval_dataloader, metric, distribution_analysis = dataset_result
+                auxiliary_eval_dataloader = None
+            client_val_dataloaders = None
             
         exp_logger.info(f"Data distribution analysis:")
         exp_logger.info(f"  - Average entropy: {distribution_analysis['avg_entropy']:.3f} ± {distribution_analysis['std_entropy']:.3f}")
@@ -647,6 +664,7 @@ def run_federated_learning(args, exp_dir):
     if is_force_method:
         # Create FORCE clients
         for i in range(args.num_clients):
+            val_data = client_val_dataloaders[i] if client_val_dataloaders else None
             client = ForceClient(
                 client_id=i,
                 model=copy.deepcopy(model),
@@ -654,13 +672,15 @@ def run_federated_learning(args, exp_dir):
                 device=device,
                 learning_rate=args.learning_rate,
                 num_epochs=args.num_epochs,
-                lambda_ortho=args.lambda_ortho
+                lambda_ortho=args.lambda_ortho,
+                val_data=val_data
             )
             clients.append(client)
     else:
         # Create baseline clients
         baseline_method = "ffa_lora" if args.method == "ffa_lora" else "lora"
         for i in range(args.num_clients):
+            val_data = client_val_dataloaders[i] if client_val_dataloaders else None
             client = BaselineClient(
                 client_id=i,
                 model=copy.deepcopy(model),
@@ -668,7 +688,8 @@ def run_federated_learning(args, exp_dir):
                 device=device,
                 baseline_method=baseline_method,
                 learning_rate=args.learning_rate,
-                num_epochs=args.num_epochs
+                num_epochs=args.num_epochs,
+                val_data=val_data
             )
             clients.append(client)
     
@@ -703,8 +724,16 @@ def run_federated_learning(args, exp_dir):
             "client_losses": []
         }
         
+        # Client evaluation tracking
+        if args.enable_client_evaluation:
+            round_results["client_evaluations"] = {
+                "after_local_training": [],
+                "after_aggregation": []
+            }
+        
         # Train each client
         client_models = []
+        client_data_sizes = []
         
         for client in clients:
             # Train client
@@ -721,11 +750,19 @@ def run_federated_learning(args, exp_dir):
                     gradient_accumulation_steps=args.gradient_accumulation_steps
                 )
             
-            # Collect client model
+            # Evaluate client AFTER local training (before aggregation)
+            if args.enable_client_evaluation:
+                client_eval_results = client.evaluate(metric=metric)
+                if client_eval_results:
+                    client_eval_results["client_id"] = client.client_id
+                    round_results["client_evaluations"]["after_local_training"].append(client_eval_results)
+            
+            # Collect client model and data size
             client_models.append(client.get_parameters())
+            client_data_sizes.append(len(client.data))
         
-        # Server aggregation
-        server.aggregate(client_models)
+        # Server aggregation with proper FedAvg weighting
+        server.aggregate(client_models, client_data_sizes)
         
         # Evaluate global model
         eval_results = server.evaluate(eval_dataloader, metric=metric)
@@ -778,6 +815,35 @@ def run_federated_learning(args, exp_dir):
         global_state = server.get_model_state()
         for client in clients:
             client.set_parameters(global_state)
+            
+            # Evaluate client AFTER aggregation (with new global model)
+            if args.enable_client_evaluation:
+                client_eval_results = client.evaluate(metric=metric)
+                if client_eval_results:
+                    client_eval_results["client_id"] = client.client_id
+                    round_results["client_evaluations"]["after_aggregation"].append(client_eval_results)
+        
+        # Add client evaluation statistics if enabled
+        if args.enable_client_evaluation:
+            # Calculate statistics for after_local_training
+            pre_agg_accs = [eval_res.get("accuracy", 0.0) for eval_res in round_results["client_evaluations"]["after_local_training"]]
+            post_agg_accs = [eval_res.get("accuracy", 0.0) for eval_res in round_results["client_evaluations"]["after_aggregation"]]
+            
+            if pre_agg_accs and post_agg_accs:
+                round_results["client_stats"] = {
+                    "pre_aggregation": {
+                        "mean_accuracy": sum(pre_agg_accs) / len(pre_agg_accs),
+                        "std_accuracy": (sum([(acc - sum(pre_agg_accs)/len(pre_agg_accs))**2 for acc in pre_agg_accs]) / len(pre_agg_accs))**0.5 if len(pre_agg_accs) > 1 else 0.0,
+                        "min_accuracy": min(pre_agg_accs),
+                        "max_accuracy": max(pre_agg_accs)
+                    },
+                    "post_aggregation": {
+                        "mean_accuracy": sum(post_agg_accs) / len(post_agg_accs),
+                        "std_accuracy": (sum([(acc - sum(post_agg_accs)/len(post_agg_accs))**2 for acc in post_agg_accs]) / len(post_agg_accs))**0.5 if len(post_agg_accs) > 1 else 0.0,
+                        "min_accuracy": min(post_agg_accs),
+                        "max_accuracy": max(post_agg_accs)
+                    }
+                }
     
     # Save final results
     results["final_accuracy"] = results["rounds"][-1]["accuracy"] if results["rounds"] else 0.0
@@ -876,6 +942,12 @@ def main():
                         help="Dirichlet distribution parameter for non-IID split (lower = more non-IID)")
     parser.add_argument("--enable_federated_split", action="store_true",
                         help="Enable federated non-IID data splitting with visualization")
+    
+    # Client evaluation parameters
+    parser.add_argument("--enable_client_evaluation", action="store_true",
+                        help="Enable client-side evaluation on local validation data")
+    parser.add_argument("--client_validation_ratio", type=float, default=0.2,
+                        help="Ratio of each client's data to use for validation (0.0-1.0)")
     
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")

@@ -27,32 +27,44 @@ class Server:
         # Track round number for logging
         self.current_round = 0
     
-    def aggregate(self, client_models):
+    def aggregate(self, client_models, client_data_sizes=None):
         """
-        Aggregate models using Federated Averaging (FedAvg).
+        Aggregate models using Federated Averaging (FedAvg) with proper weighting.
         
         This is the core of federated learning - combining multiple locally trained
-        models into a single global model by averaging their parameters.
+        models into a single global model by weighted averaging their parameters
+        based on client data sizes (proper FedAvg implementation).
         
         Args:
             client_models: List of model state dictionaries from clients
+            client_data_sizes: List of data sizes for each client (for weighted averaging)
+                             If None, falls back to simple averaging for backward compatibility
         """
         if not client_models:
             print("Warning: No client models to aggregate")
             return
         
-        # Start with a copy of the first client's model parameters
+        # Handle backward compatibility - if no data sizes provided, use simple averaging
+        if client_data_sizes is None:
+            print("Warning: No client data sizes provided, using simple averaging (not proper FedAvg)")
+            client_weights = [1.0 / len(client_models)] * len(client_models)
+        else:
+            # Calculate proper FedAvg weights: w_k = n_k / n_total
+            total_data_size = sum(client_data_sizes)
+            client_weights = [size / total_data_size for size in client_data_sizes]
+            print(f"FedAvg weights: {[f'{w:.3f}' for w in client_weights]} (data sizes: {client_data_sizes})")
+        
+        # Initialize global parameters with zeros
         global_params = copy.deepcopy(client_models[0])
-        
-        # Average the parameters of all client models
         for key in global_params.keys():
-            # Sum all client parameters for this key
-            for i in range(1, len(client_models)):
-                global_params[key] += client_models[i][key]
-            # Average by dividing by number of clients
-            global_params[key] = torch.div(global_params[key], len(client_models))
+            global_params[key] = torch.zeros_like(global_params[key])
         
-        # Update global model with averaged parameters
+        # Weighted averaging of all client models
+        for key in global_params.keys():
+            for i, client_model in enumerate(client_models):
+                global_params[key] += client_weights[i] * client_model[key]
+        
+        # Update global model with weighted averaged parameters
         self.global_model.load_state_dict(global_params)
         
         # Increment round counter

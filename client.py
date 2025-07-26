@@ -44,7 +44,7 @@ class ForceClient:
     if DoRA magnitude vectors are not found.
     """
     
-    def __init__(self, client_id, model, data, device, learning_rate=3e-4, num_epochs=2, lambda_ortho=0.1):
+    def __init__(self, client_id, model, data, device, learning_rate=3e-4, num_epochs=2, lambda_ortho=0.1, val_data=None):
         """
         Initialize FORCE client with DoRA model, data, and training configuration.
         
@@ -56,6 +56,7 @@ class ForceClient:
             learning_rate: Learning rate for optimizers
             num_epochs: Number of training epochs per round
             lambda_ortho: Weight for orthogonality regularization loss
+            val_data: Local validation dataset for client-side evaluation (optional)
             
         Note:
             The model must be configured with DoRA (use_dora=True) as FORCE methods
@@ -65,6 +66,7 @@ class ForceClient:
         self.model = model
         self.device = device
         self.data = data
+        self.val_data = val_data  # Client validation dataloader
         self.learning_rate = learning_rate
         self.num_epochs = num_epochs
         self.lambda_ortho = lambda_ortho  # Orthogonality regularization weight
@@ -536,6 +538,80 @@ class ForceClient:
         # Re-initialize learning rate schedulers after loading new parameters
         self._initialize_lr_schedulers()
         print(f"Client {self.client_id}: Reinitialized optimizers and schedulers after receiving new parameters")
+    
+    def evaluate(self, metric=None):
+        """
+        Evaluate the client model on local validation data.
+        
+        Args:
+            metric: HuggingFace evaluate metric object (optional, will create one if needed)
+            
+        Returns:
+            eval_results: Dictionary containing evaluation metrics
+        """
+        if self.val_data is None:
+            print(f"Client {self.client_id}: No validation data available for evaluation")
+            return None
+            
+        # Move model to device and set to evaluation mode
+        self.model.to(self.device)
+        self.model.eval()
+        
+        # Create metric if not provided
+        if metric is None:
+            import evaluate
+            # Default to accuracy metric, this will be overridden by caller
+            metric = evaluate.load("accuracy")
+        
+        # Create a fresh metric instance to avoid accumulation
+        import evaluate
+        dataset_name = metric.config_name if hasattr(metric, 'config_name') else 'accuracy'
+        if hasattr(metric, 'config_name') and metric.config_name:
+            fresh_metric = evaluate.load("glue", dataset_name)
+        else:
+            fresh_metric = evaluate.load("accuracy")
+        
+        total_loss = 0.0
+        num_samples = 0
+        
+        with torch.no_grad():
+            for batch in self.val_data:
+                # Move batch to device
+                if isinstance(batch, dict):
+                    batch = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                else:
+                    batch.to(self.device)
+                
+                # Forward pass
+                outputs = self.model(**batch)
+                
+                # Get predictions and references
+                predictions = outputs.logits.argmax(dim=-1)
+                references = batch["labels"]
+                
+                # Add to metric
+                fresh_metric.add_batch(
+                    predictions=predictions.cpu(),
+                    references=references.cpu()
+                )
+                
+                # Accumulate loss
+                if hasattr(outputs, 'loss') and outputs.loss is not None:
+                    total_loss += outputs.loss.item()
+                
+                num_samples += len(references)
+        
+        # Compute metrics
+        eval_results = fresh_metric.compute()
+        
+        # Add loss and sample count
+        if num_samples > 0:
+            eval_results['loss'] = total_loss / len(self.val_data)
+        eval_results['num_samples'] = num_samples
+        
+        self.logger.info(f"Client {self.client_id} Evaluation: {eval_results}")
+        
+        return eval_results
 
 
 class BaselineClient:
@@ -544,7 +620,7 @@ class BaselineClient:
     Supports standard Fed-LoRA and FFA-LoRA methods.
     """
     
-    def __init__(self, client_id, model, data, device, baseline_method="lora", learning_rate=3e-4, num_epochs=2):
+    def __init__(self, client_id, model, data, device, baseline_method="lora", learning_rate=3e-4, num_epochs=2, val_data=None):
         """
         Initialize baseline client for comparison experiments
         
@@ -556,10 +632,12 @@ class BaselineClient:
             baseline_method: "lora" for standard LoRA (FedIT), "ffa_lora" for FFA-LoRA
             learning_rate: Learning rate for optimizer
             num_epochs: Number of training epochs
+            val_data: Local validation dataset for client-side evaluation (optional)
         """
         self.client_id = client_id
         self.device = device
         self.data = data
+        self.val_data = val_data  # Client validation dataloader
         self.baseline_method = baseline_method
         self.learning_rate = learning_rate
         self.num_epochs = num_epochs
@@ -695,4 +773,78 @@ class BaselineClient:
             num_training_steps=num_training_steps
         )
         
-        print(f"Client {self.client_id}: Reinitialized optimizer and scheduler after receiving new parameters") 
+        print(f"Client {self.client_id}: Reinitialized optimizer and scheduler after receiving new parameters")
+    
+    def evaluate(self, metric=None):
+        """
+        Evaluate the client model on local validation data.
+        
+        Args:
+            metric: HuggingFace evaluate metric object (optional, will create one if needed)
+            
+        Returns:
+            eval_results: Dictionary containing evaluation metrics
+        """
+        if self.val_data is None:
+            print(f"Client {self.client_id}: No validation data available for evaluation")
+            return None
+            
+        # Move model to device and set to evaluation mode
+        self.model.to(self.device)
+        self.model.eval()
+        
+        # Create metric if not provided
+        if metric is None:
+            import evaluate
+            # Default to accuracy metric, this will be overridden by caller
+            metric = evaluate.load("accuracy")
+        
+        # Create a fresh metric instance to avoid accumulation
+        import evaluate
+        dataset_name = metric.config_name if hasattr(metric, 'config_name') else 'accuracy'
+        if hasattr(metric, 'config_name') and metric.config_name:
+            fresh_metric = evaluate.load("glue", dataset_name)
+        else:
+            fresh_metric = evaluate.load("accuracy")
+        
+        total_loss = 0.0
+        num_samples = 0
+        
+        with torch.no_grad():
+            for batch in self.val_data:
+                # Move batch to device
+                if isinstance(batch, dict):
+                    batch = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                else:
+                    batch.to(self.device)
+                
+                # Forward pass
+                outputs = self.model(**batch)
+                
+                # Get predictions and references
+                predictions = outputs.logits.argmax(dim=-1)
+                references = batch["labels"]
+                
+                # Add to metric
+                fresh_metric.add_batch(
+                    predictions=predictions.cpu(),
+                    references=references.cpu()
+                )
+                
+                # Accumulate loss
+                if hasattr(outputs, 'loss') and outputs.loss is not None:
+                    total_loss += outputs.loss.item()
+                
+                num_samples += len(references)
+        
+        # Compute metrics
+        eval_results = fresh_metric.compute()
+        
+        # Add loss and sample count
+        if num_samples > 0:
+            eval_results['loss'] = total_loss / len(self.val_data)
+        eval_results['num_samples'] = num_samples
+        
+        self.logger.info(f"Client {self.client_id} Evaluation: {eval_results}")
+        
+        return eval_results 

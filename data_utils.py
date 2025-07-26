@@ -140,7 +140,8 @@ def load_glue_dataset(dataset_name, model_name_or_path="roberta-base", batch_siz
 
 
 def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="roberta-base", 
-                                batch_size=32, alpha=0.5, seed=42, save_dir=None):
+                                batch_size=32, alpha=0.5, seed=42, save_dir=None, 
+                                client_validation_ratio=None):
     """
     Load GLUE dataset with non-IID federated splits and data distribution visualization.
     
@@ -152,10 +153,13 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
         alpha: Dirichlet distribution parameter (lower = more non-IID)
         seed: Random seed for reproducibility
         save_dir: Directory to save distribution analysis and visualizations
+        client_validation_ratio: Ratio of each client's data to use for validation (0.0-1.0)
+                               If None, clients get only training data (original behavior)
         
     Returns:
-        client_dataloaders: List of DataLoaders for each client
-        eval_dataloader: DataLoader for evaluation
+        client_dataloaders: List of training DataLoaders for each client
+        client_val_dataloaders: List of validation DataLoaders for each client (if client_validation_ratio is set)
+        eval_dataloader: DataLoader for global evaluation
         metric: Evaluation metric for the dataset
         mismatched_eval_dataloader: Additional eval dataloader for MNLI (if applicable)
         distribution_analysis: Analysis of the data distribution
@@ -251,22 +255,71 @@ def load_federated_glue_dataset(dataset_name, num_clients, model_name_or_path="r
     # Create client subsets
     client_subsets = create_client_subsets(train_dataset, client_indices)
     
-    # Create DataLoaders for each client
+    # Create DataLoaders for each client with optional train/validation splitting
     client_dataloaders = []
-    for subset in client_subsets:
-        client_dataloader = DataLoader(
-            subset,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=train_dataloader.collate_fn
-        )
-        client_dataloaders.append(client_dataloader)
+    client_val_dataloaders = []
+    
+    if client_validation_ratio is not None and client_validation_ratio > 0:
+        # Split each client's data into train/validation
+        from sklearn.model_selection import train_test_split
+        import numpy as np
+        
+        for i, subset in enumerate(client_subsets):
+            # Get indices and labels for stratified splitting
+            subset_indices = list(range(len(subset)))
+            subset_labels = [subset[idx]['labels'].item() for idx in subset_indices]
+            
+            # Stratified split to maintain label distribution
+            train_indices, val_indices = train_test_split(
+                subset_indices,
+                test_size=client_validation_ratio,
+                stratify=subset_labels,
+                random_state=seed + i  # Different seed per client for diversity
+            )
+            
+            # Create train subset
+            train_subset = torch.utils.data.Subset(subset, train_indices)
+            train_dataloader = DataLoader(
+                train_subset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=train_dataloader.collate_fn
+            )
+            client_dataloaders.append(train_dataloader)
+            
+            # Create validation subset
+            val_subset = torch.utils.data.Subset(subset, val_indices)
+            val_dataloader = DataLoader(
+                val_subset,
+                batch_size=batch_size,
+                shuffle=False,  # No need to shuffle validation data
+                collate_fn=train_dataloader.collate_fn
+            )
+            client_val_dataloaders.append(val_dataloader)
+            
+            print(f"Client {i}: {len(train_subset)} train, {len(val_subset)} validation samples")
+    else:
+        # Original behavior - no client-side validation splitting
+        for subset in client_subsets:
+            client_dataloader = DataLoader(
+                subset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=train_dataloader.collate_fn
+            )
+            client_dataloaders.append(client_dataloader)
     
     # Return results
     if auxiliary_eval_dataloader is not None:
-        return client_dataloaders, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis
+        if client_validation_ratio is not None and client_validation_ratio > 0:
+            return client_dataloaders, client_val_dataloaders, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis
+        else:
+            return client_dataloaders, eval_dataloader, auxiliary_eval_dataloader, metric, distribution_analysis
     else:
-        return client_dataloaders, eval_dataloader, metric, distribution_analysis
+        if client_validation_ratio is not None and client_validation_ratio > 0:
+            return client_dataloaders, client_val_dataloaders, eval_dataloader, metric, distribution_analysis
+        else:
+            return client_dataloaders, eval_dataloader, metric, distribution_analysis
 
 
 def load_tokenizer(model_name_or_path):
